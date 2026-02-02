@@ -1,20 +1,25 @@
 //! HTTP server for LocalGPT
 //!
-//! Note: The chat endpoint creates a new agent per request because the Agent
-//! struct contains SQLite connections that cannot be shared across threads.
-//! For persistent session state, use the CLI interface instead.
+//! The chat endpoint uses a shared Agent with session persistence across requests.
 
 use anyhow::Result;
 use axum::{
     extract::{Query, State},
     http::StatusCode,
-    response::{IntoResponse, Json, Response},
+    response::{
+        sse::{Event, Sse},
+        IntoResponse, Json, Response,
+    },
     routing::{get, post},
     Router,
 };
+use futures::StreamExt;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
+use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use tokio::sync::Mutex;
 use tower_http::cors::{Any, CorsLayer};
 use tracing::info;
 
@@ -28,6 +33,7 @@ pub struct Server {
 
 struct AppState {
     config: Config,
+    agent: Arc<Mutex<Agent>>,
 }
 
 impl Server {
@@ -38,8 +44,19 @@ impl Server {
     }
 
     pub async fn run(&self) -> Result<()> {
+        // Create shared agent at startup
+        let memory = MemoryManager::new(&self.config.memory)?;
+        let agent_config = AgentConfig {
+            model: self.config.agent.default_model.clone(),
+            context_window: self.config.agent.context_window,
+            reserve_tokens: self.config.agent.reserve_tokens,
+        };
+        let mut agent = Agent::new(agent_config, &self.config, memory).await?;
+        agent.new_session().await?;
+
         let state = Arc::new(AppState {
             config: self.config.clone(),
+            agent: Arc::new(Mutex::new(agent)),
         });
 
         let cors = CorsLayer::new()
@@ -50,6 +67,7 @@ impl Server {
         let app = Router::new()
             .route("/health", get(health_check))
             .route("/api/chat", post(chat))
+            .route("/api/chat/stream", post(chat_stream))
             .route("/api/memory/search", get(memory_search))
             .route("/api/memory/stats", get(memory_stats))
             .route("/api/status", get(status))
@@ -114,41 +132,67 @@ struct ChatResponse {
 }
 
 async fn chat(State(state): State<Arc<AppState>>, Json(request): Json<ChatRequest>) -> Response {
-    // Create a new agent for this request
-    // Note: This means no session persistence across HTTP requests
-    let result = tokio::task::spawn_blocking({
-        let config = state.config.clone();
-        let message = request.message.clone();
-        let model = request.model.clone();
-        move || {
-            // Run in blocking context since Agent isn't Send+Sync
-            let rt = tokio::runtime::Handle::current();
-            rt.block_on(async {
-                let memory = MemoryManager::new(&config.memory)?;
+    let mut agent = state.agent.lock().await;
 
-                let agent_config = AgentConfig {
-                    model: model.unwrap_or(config.agent.default_model.clone()),
-                    context_window: config.agent.context_window,
-                    reserve_tokens: config.agent.reserve_tokens,
-                };
+    // TODO: Handle model change if request.model differs from current
 
-                let mut agent = Agent::new(agent_config, &config, memory).await?;
-                agent.new_session().await?;
-
-                let response = agent.chat(&message).await?;
-                let model = agent.model().to_string();
-
-                Ok::<_, anyhow::Error>(ChatResponse { response, model })
-            })
-        }
-    })
-    .await;
-
-    match result {
-        Ok(Ok(response)) => Json(response).into_response(),
-        Ok(Err(e)) => AppError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    match agent.chat(&request.message).await {
+        Ok(response) => Json(ChatResponse {
+            response,
+            model: agent.model().to_string(),
+        })
+        .into_response(),
         Err(e) => AppError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
+}
+
+// Streaming chat endpoint (SSE)
+async fn chat_stream(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<ChatRequest>,
+) -> Sse<impl futures::Stream<Item = Result<Event, Infallible>>> {
+    let agent = state.agent.clone();
+
+    let stream = async_stream::stream! {
+        let mut agent = agent.lock().await;
+
+        // Add user message
+        agent.add_user_message(&request.message);
+
+        // Get provider stream
+        let messages = agent.session_messages();
+        match agent.provider().chat_stream(&messages, None).await {
+            Ok(mut response_stream) => {
+                let mut full_response = String::new();
+
+                while let Some(chunk) = response_stream.next().await {
+                    match chunk {
+                        Ok(c) => {
+                            full_response.push_str(&c.delta);
+                            let data = json!({"delta": c.delta, "done": c.done});
+                            yield Ok(Event::default().data(data.to_string()));
+
+                            if c.done {
+                                agent.add_assistant_message(&full_response);
+                                break;
+                            }
+                        }
+                        Err(e) => {
+                            yield Ok(Event::default().data(json!({"error": e.to_string()}).to_string()));
+                            break;
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                yield Ok(Event::default().data(json!({"error": e.to_string()}).to_string()));
+            }
+        }
+
+        yield Ok(Event::default().data("[DONE]"));
+    };
+
+    Sse::new(stream)
 }
 
 // Memory search endpoint

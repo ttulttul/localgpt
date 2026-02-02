@@ -1,8 +1,11 @@
 use anyhow::Result;
 use async_trait::async_trait;
+use futures::Stream;
+use futures::StreamExt;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::pin::Pin;
 use tracing::debug;
 
 use crate::config::Config;
@@ -45,12 +48,42 @@ pub enum LLMResponse {
     ToolCalls(Vec<ToolCall>),
 }
 
+#[derive(Debug, Clone)]
+pub struct StreamChunk {
+    pub delta: String,
+    pub done: bool,
+}
+
+pub type StreamResult = Pin<Box<dyn Stream<Item = Result<StreamChunk>> + Send>>;
+
 #[async_trait]
 pub trait LLMProvider: Send + Sync {
     async fn chat(&self, messages: &[Message], tools: Option<&[ToolSchema]>)
         -> Result<LLMResponse>;
 
     async fn summarize(&self, text: &str) -> Result<String>;
+
+    /// Stream chat response (default: falls back to non-streaming)
+    async fn chat_stream(
+        &self,
+        messages: &[Message],
+        _tools: Option<&[ToolSchema]>,
+    ) -> Result<StreamResult> {
+        // Default implementation: single chunk with full response
+        let resp = self.chat(messages, None).await?;
+        let text = match resp {
+            LLMResponse::Text(t) => t,
+            LLMResponse::ToolCalls(_) => {
+                return Err(anyhow::anyhow!("Tool calls not supported in streaming"))
+            }
+        };
+        Ok(Box::pin(futures::stream::once(async move {
+            Ok(StreamChunk {
+                delta: text,
+                done: true,
+            })
+        })))
+    }
 }
 
 pub fn create_provider(model: &str, config: &Config) -> Result<Box<dyn LLMProvider>> {
@@ -523,5 +556,88 @@ impl LLMProvider for OllamaProvider {
             LLMResponse::Text(summary) => Ok(summary),
             _ => anyhow::bail!("Unexpected response type"),
         }
+    }
+
+    async fn chat_stream(
+        &self,
+        messages: &[Message],
+        _tools: Option<&[ToolSchema]>,
+    ) -> Result<StreamResult> {
+        let formatted_messages: Vec<Value> = messages
+            .iter()
+            .map(|m| {
+                json!({
+                    "role": match m.role {
+                        Role::System => "system",
+                        Role::User => "user",
+                        Role::Assistant => "assistant",
+                        Role::Tool => "user",
+                    },
+                    "content": m.content
+                })
+            })
+            .collect();
+
+        let body = json!({
+            "model": self.model,
+            "messages": formatted_messages,
+            "stream": true
+        });
+
+        debug!(
+            "Ollama streaming request: {}",
+            serde_json::to_string_pretty(&body)?
+        );
+
+        let response = self
+            .client
+            .post(format!("{}/api/chat", self.endpoint))
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .send()
+            .await?;
+
+        // Ollama streams newline-delimited JSON
+        let stream = async_stream::stream! {
+            let mut byte_stream = response.bytes_stream();
+            let mut buffer = String::new();
+
+            while let Some(chunk) = byte_stream.next().await {
+                match chunk {
+                    Ok(bytes) => {
+                        buffer.push_str(&String::from_utf8_lossy(&bytes));
+
+                        // Process complete lines
+                        while let Some(pos) = buffer.find('\n') {
+                            let line = buffer[..pos].to_string();
+                            buffer = buffer[pos + 1..].to_string();
+
+                            if line.is_empty() {
+                                continue;
+                            }
+
+                            if let Ok(json) = serde_json::from_str::<Value>(&line) {
+                                let content = json["message"]["content"]
+                                    .as_str()
+                                    .unwrap_or("")
+                                    .to_string();
+                                let done = json["done"].as_bool().unwrap_or(false);
+
+                                yield Ok(StreamChunk {
+                                    delta: content,
+                                    done,
+                                });
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        yield Err(anyhow::anyhow!("Stream error: {}", e));
+                        break;
+                    }
+                }
+            }
+        };
+
+        Ok(Box::pin(stream))
     }
 }

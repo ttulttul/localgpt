@@ -15,6 +15,7 @@ use tracing::info;
 
 use crate::config::MemoryConfig;
 
+#[derive(Clone)]
 pub struct MemoryManager {
     workspace: PathBuf,
     index: MemoryIndex,

@@ -1,15 +1,17 @@
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use rusqlite::{params, Connection};
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tracing::debug;
 
 use super::search::MemoryChunk;
 
+#[derive(Clone)]
 pub struct MemoryIndex {
-    conn: Connection,
+    conn: Arc<Mutex<Connection>>,
     workspace: PathBuf,
 }
 
@@ -71,7 +73,7 @@ impl MemoryIndex {
         )?;
 
         Ok(Self {
-            conn,
+            conn: Arc::new(Mutex::new(conn)),
             workspace: workspace.to_path_buf(),
         })
     }
@@ -93,10 +95,14 @@ impl MemoryIndex {
             .to_string_lossy()
             .to_string();
 
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
+
         // Check if file has changed
         if !force {
-            let existing: Option<String> = self
-                .conn
+            let existing: Option<String> = conn
                 .query_row(
                     "SELECT hash FROM files WHERE path = ?1",
                     params![&relative_path],
@@ -113,13 +119,13 @@ impl MemoryIndex {
         debug!("Indexing file: {}", relative_path);
 
         // Update file record
-        self.conn.execute(
+        conn.execute(
             "INSERT OR REPLACE INTO files (path, hash, mtime, size) VALUES (?1, ?2, ?3, ?4)",
             params![&relative_path, &hash, mtime, size],
         )?;
 
         // Delete existing chunks
-        self.conn.execute(
+        conn.execute(
             "DELETE FROM chunks WHERE file_path = ?1",
             params![&relative_path],
         )?;
@@ -128,7 +134,7 @@ impl MemoryIndex {
         let chunks = chunk_text(&content, 400, 80);
 
         for (_i, chunk) in chunks.iter().enumerate() {
-            self.conn.execute(
+            conn.execute(
                 "INSERT INTO chunks (file_path, line_start, line_end, content) VALUES (?1, ?2, ?3, ?4)",
                 params![&relative_path, chunk.line_start, chunk.line_end, &chunk.content],
             )?;
@@ -142,7 +148,12 @@ impl MemoryIndex {
         // Escape special FTS5 characters
         let escaped_query = escape_fts_query(query);
 
-        let mut stmt = self.conn.prepare(
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
+
+        let mut stmt = conn.prepare(
             r#"
             SELECT c.file_path, c.line_start, c.line_end, c.content, bm25(chunks_fts) as score
             FROM chunks_fts fts
@@ -173,9 +184,11 @@ impl MemoryIndex {
 
     /// Get total chunk count
     pub fn chunk_count(&self) -> Result<usize> {
-        let count: i64 = self
+        let conn = self
             .conn
-            .query_row("SELECT COUNT(*) FROM chunks", [], |row| row.get(0))?;
+            .lock()
+            .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
+        let count: i64 = conn.query_row("SELECT COUNT(*) FROM chunks", [], |row| row.get(0))?;
         Ok(count as usize)
     }
 
@@ -187,7 +200,11 @@ impl MemoryIndex {
             .to_string_lossy()
             .to_string();
 
-        let count: i64 = self.conn.query_row(
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
+        let count: i64 = conn.query_row(
             "SELECT COUNT(*) FROM chunks WHERE file_path = ?1",
             params![&relative_path],
             |row| row.get(0),

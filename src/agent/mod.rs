@@ -2,7 +2,9 @@ mod providers;
 mod session;
 mod tools;
 
-pub use providers::{LLMProvider, LLMResponse, Message, Role, ToolCall, ToolSchema};
+pub use providers::{
+    LLMProvider, LLMResponse, Message, Role, StreamChunk, StreamResult, ToolCall, ToolSchema,
+};
 pub use session::{Session, SessionStatus};
 pub use tools::{Tool, ToolResult};
 
@@ -263,5 +265,35 @@ If nothing to store, reply: NO_REPLY"#;
 
     pub fn session_status(&self) -> SessionStatus {
         self.session.status()
+    }
+
+    /// Get a reference to the LLM provider for streaming
+    pub fn provider(&self) -> &dyn LLMProvider {
+        &*self.provider
+    }
+
+    /// Get messages for the LLM (for streaming)
+    pub fn session_messages(&self) -> Vec<Message> {
+        self.session.messages_for_llm()
+    }
+
+    /// Add a user message to the session
+    pub fn add_user_message(&mut self, content: &str) {
+        self.session.add_message(Message {
+            role: Role::User,
+            content: content.to_string(),
+            tool_calls: None,
+            tool_call_id: None,
+        });
+    }
+
+    /// Add an assistant message to the session
+    pub fn add_assistant_message(&mut self, content: &str) {
+        self.session.add_message(Message {
+            role: Role::Assistant,
+            content: content.to_string(),
+            tool_calls: None,
+            tool_call_id: None,
+        });
     }
 }
