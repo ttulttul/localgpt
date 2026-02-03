@@ -183,6 +183,47 @@ impl Session {
         Ok(path)
     }
 
+    /// Save session for a specific agent ID
+    pub fn save_for_agent(&self, agent_id: &str) -> Result<PathBuf> {
+        let dir = get_sessions_dir_for_agent(agent_id)?;
+        fs::create_dir_all(&dir)?;
+
+        let path = dir.join(format!("{}.jsonl", self.id));
+        let mut file = File::create(&path)?;
+
+        // Write header
+        let header = serde_json::json!({
+            "type": "session_header",
+            "id": self.id,
+            "created_at": self.created_at,
+            "compaction_count": self.compaction_count
+        });
+        writeln!(file, "{}", serde_json::to_string(&header)?)?;
+
+        // Write system context if present
+        if let Some(ref context) = self.system_context {
+            let context_entry = serde_json::json!({
+                "type": "system_context",
+                "content": context
+            });
+            writeln!(file, "{}", serde_json::to_string(&context_entry)?)?;
+        }
+
+        // Write messages
+        for message in &self.messages {
+            let entry = serde_json::json!({
+                "type": "message",
+                "role": message.role,
+                "content": message.content,
+                "tool_calls": message.tool_calls,
+                "tool_call_id": message.tool_call_id
+            });
+            writeln!(file, "{}", serde_json::to_string(&entry)?)?;
+        }
+
+        Ok(path)
+    }
+
     pub fn load(session_id: &str) -> Result<Self> {
         let dir = get_sessions_dir()?;
         let path = dir.join(format!("{}.jsonl", session_id));

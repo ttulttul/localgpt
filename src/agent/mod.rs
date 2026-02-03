@@ -525,6 +525,11 @@ impl Agent {
         self.session.save()
     }
 
+    /// Save session for a specific agent ID (used by HTTP server)
+    pub async fn save_session_for_agent(&self, agent_id: &str) -> Result<PathBuf> {
+        self.session.save_for_agent(agent_id)
+    }
+
     pub fn session_status(&self) -> SessionStatus {
         self.session.status_with_usage(
             self.cumulative_usage.input_tokens,

@@ -39,6 +39,9 @@ const SESSION_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 /// Maximum number of concurrent sessions
 const MAX_SESSIONS: usize = 100;
 
+/// Agent ID for HTTP sessions
+const HTTP_AGENT_ID: &str = "http";
+
 pub struct Server {
     config: Config,
 }
@@ -46,6 +49,8 @@ pub struct Server {
 struct SessionEntry {
     agent: Agent,
     last_accessed: Instant,
+    /// Whether session has unsaved changes
+    dirty: bool,
 }
 
 struct AppState {
@@ -66,6 +71,11 @@ impl Server {
             sessions: Mutex::new(HashMap::new()),
         });
 
+        // Load persisted sessions on startup
+        if let Err(e) = load_persisted_sessions(&state).await {
+            info!("Could not load persisted sessions: {}", e);
+        }
+
         // Spawn session cleanup task
         let cleanup_state = state.clone();
         tokio::spawn(async move {
@@ -73,6 +83,16 @@ impl Server {
             loop {
                 interval.tick().await;
                 cleanup_expired_sessions(&cleanup_state).await;
+            }
+        });
+
+        // Spawn session save task (save every 5 minutes)
+        let save_state = state.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(300));
+            loop {
+                interval.tick().await;
+                save_dirty_sessions(&save_state).await;
             }
         });
 
@@ -142,6 +162,67 @@ async fn cleanup_expired_sessions(state: &Arc<AppState>) {
     }
 }
 
+// Load persisted sessions from disk
+async fn load_persisted_sessions(state: &Arc<AppState>) -> Result<(), anyhow::Error> {
+    use crate::agent::list_sessions_for_agent;
+
+    let sessions_list = list_sessions_for_agent(HTTP_AGENT_ID)?;
+    let mut loaded = 0;
+
+    for session_info in sessions_list.into_iter().take(MAX_SESSIONS) {
+        let memory = MemoryManager::new(&state.config.memory)?;
+
+        let agent_config = AgentConfig {
+            model: state.config.agent.default_model.clone(),
+            context_window: state.config.agent.context_window,
+            reserve_tokens: state.config.agent.reserve_tokens,
+        };
+
+        let mut agent = Agent::new(agent_config, &state.config, memory).await?;
+
+        // Try to resume the session
+        if agent.resume_session(&session_info.id).await.is_ok() {
+            let mut sessions = state.sessions.lock().await;
+            sessions.insert(
+                session_info.id.clone(),
+                SessionEntry {
+                    agent,
+                    last_accessed: Instant::now(),
+                    dirty: false,
+                },
+            );
+            loaded += 1;
+        }
+    }
+
+    if loaded > 0 {
+        info!("Loaded {} persisted HTTP sessions", loaded);
+    }
+
+    Ok(())
+}
+
+// Save dirty sessions to disk
+async fn save_dirty_sessions(state: &Arc<AppState>) {
+    let mut sessions = state.sessions.lock().await;
+    let mut saved = 0;
+
+    for (id, entry) in sessions.iter_mut() {
+        if entry.dirty {
+            if let Err(e) = entry.agent.save_session_for_agent(HTTP_AGENT_ID).await {
+                debug!("Failed to save session {}: {}", id, e);
+            } else {
+                entry.dirty = false;
+                saved += 1;
+            }
+        }
+    }
+
+    if saved > 0 {
+        info!("Saved {} HTTP sessions to disk", saved);
+    }
+}
+
 // Get or create a session
 async fn get_or_create_session(
     state: &Arc<AppState>,
@@ -199,6 +280,7 @@ async fn get_or_create_session(
         SessionEntry {
             agent,
             last_accessed: Instant::now(),
+            dirty: true, // New sessions should be saved
         },
     );
 
@@ -453,12 +535,15 @@ async fn chat(State(state): State<Arc<AppState>>, Json(request): Json<ChatReques
     }
 
     match entry.agent.chat(&request.message).await {
-        Ok(response) => Json(ChatResponse {
-            response,
-            session_id,
-            model: entry.agent.model().to_string(),
-        })
-        .into_response(),
+        Ok(response) => {
+            entry.dirty = true;
+            Json(ChatResponse {
+                response,
+                session_id,
+                model: entry.agent.model().to_string(),
+            })
+            .into_response()
+        }
         Err(e) => AppError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }
@@ -491,6 +576,7 @@ async fn chat_stream(
         };
 
         entry.last_accessed = Instant::now();
+        entry.dirty = true;
 
         // Use streaming with tools
         match entry.agent.chat_stream_with_tools(&message).await {
