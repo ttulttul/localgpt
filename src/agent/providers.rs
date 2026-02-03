@@ -104,10 +104,9 @@ pub trait LLMProvider: Send + Sync {
 fn resolve_model_alias(model: &str) -> String {
     // OpenClaw-compatible aliases
     match model.to_lowercase().as_str() {
-        // Short aliases (OpenClaw defaults.ts pattern)
+        // Short aliases → latest 4.5 models
         "opus" => "anthropic/claude-opus-4-5".to_string(),
         "sonnet" => "anthropic/claude-sonnet-4-5".to_string(),
-        "haiku" => "anthropic/claude-3-5-haiku".to_string(),
         "gpt" => "openai/gpt-4o".to_string(),
         "gpt-mini" => "openai/gpt-4o-mini".to_string(),
         _ => model.to_string(),
@@ -115,17 +114,19 @@ fn resolve_model_alias(model: &str) -> String {
 }
 
 /// Map OpenClaw model ID to actual API model ID
+/// See: https://docs.anthropic.com/en/docs/about-claude/models
 fn normalize_model_id(provider: &str, model_id: &str) -> String {
     match provider {
         "anthropic" => {
             match model_id.to_lowercase().as_str() {
-                // Claude 4.x models
-                "claude-opus-4-5" | "opus-4.5" | "opus" => "claude-opus-4-5-20250514".to_string(),
-                "claude-sonnet-4-5" | "claude-sonnet-4" | "sonnet-4.5" | "sonnet-4" | "sonnet" => "claude-sonnet-4-20250514".to_string(),
-                // Claude 3.5 models
-                "claude-3-5-haiku" | "haiku-3.5" | "haiku" => "claude-3-5-haiku-20241022".to_string(),
+                // Claude 4.5 models (latest)
+                "claude-opus-4-5" | "opus-4.5" | "opus" => "claude-opus-4-5-20251101".to_string(),
+                "claude-sonnet-4-5" | "sonnet-4.5" | "sonnet" => "claude-sonnet-4-5-20250929".to_string(),
+                // Claude 4 models (legacy)
+                "claude-sonnet-4" | "sonnet-4" => "claude-sonnet-4-20250514".to_string(),
+                "claude-opus-4" | "opus-4" => "claude-opus-4-20250514".to_string(),
+                // Claude 3.x models (legacy)
                 "claude-3-5-sonnet" | "sonnet-3.5" => "claude-3-5-sonnet-20241022".to_string(),
-                // Claude 3 models
                 "claude-3-opus" | "opus-3" => "claude-3-opus-20240229".to_string(),
                 other => other.to_string(),
             }

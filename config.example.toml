@@ -9,12 +9,10 @@
 # Anthropic API (recommended, requires ANTHROPIC_API_KEY):
 #   - "anthropic/claude-opus-4-5" (recommended)
 #   - "anthropic/claude-sonnet-4-5"
-#   - "anthropic/claude-3-5-haiku"
 #
-# Short aliases (auto-resolved):
+# Short aliases (auto-resolved to latest 4.5 models):
 #   - "opus"   → anthropic/claude-opus-4-5
 #   - "sonnet" → anthropic/claude-sonnet-4-5
-#   - "haiku"  → anthropic/claude-3-5-haiku
 #   - "gpt"    → openai/gpt-4o
 #
 # OpenAI API (requires OPENAI_API_KEY):
