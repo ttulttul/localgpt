@@ -270,3 +270,102 @@ pub fn get_state_dir() -> Result<PathBuf> {
 fn estimate_tokens(text: &str) -> usize {
     text.len() / 4
 }
+
+/// Session info for listing
+#[derive(Debug, Clone)]
+pub struct SessionInfo {
+    pub id: String,
+    pub created_at: DateTime<Utc>,
+    pub message_count: usize,
+    pub file_size: u64,
+}
+
+/// List available sessions
+pub fn list_sessions() -> Result<Vec<SessionInfo>> {
+    list_sessions_for_agent(DEFAULT_AGENT_ID)
+}
+
+/// List sessions for a specific agent
+pub fn list_sessions_for_agent(agent_id: &str) -> Result<Vec<SessionInfo>> {
+    let sessions_dir = get_sessions_dir_for_agent(agent_id)?;
+
+    if !sessions_dir.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut sessions = Vec::new();
+
+    for entry in fs::read_dir(&sessions_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+
+        // Skip sessions.json and non-.jsonl files
+        if path.extension().map(|e| e != "jsonl").unwrap_or(true) {
+            continue;
+        }
+
+        let filename = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("");
+
+        // Skip if not a valid UUID-like name
+        if filename.len() < 32 {
+            continue;
+        }
+
+        let metadata = fs::metadata(&path)?;
+        let file_size = metadata.len();
+
+        // Read first line to get session header
+        if let Ok(file) = File::open(&path) {
+            let reader = BufReader::new(file);
+            if let Some(Ok(first_line)) = reader.lines().next() {
+                if let Ok(header) = serde_json::from_str::<serde_json::Value>(&first_line) {
+                    if header["type"].as_str() == Some("session_header") {
+                        let created_at = header["created_at"]
+                            .as_str()
+                            .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+                            .map(|dt| dt.with_timezone(&Utc))
+                            .unwrap_or_else(Utc::now);
+
+                        // Count messages (approximate by counting lines - 2 for header and context)
+                        let message_count = fs::read_to_string(&path)
+                            .map(|s| s.lines().count().saturating_sub(2))
+                            .unwrap_or(0);
+
+                        sessions.push(SessionInfo {
+                            id: filename.to_string(),
+                            created_at,
+                            message_count,
+                            file_size,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    // Sort by created_at (newest first)
+    sessions.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+
+    Ok(sessions)
+}
+
+/// Get the most recent session ID
+pub fn get_last_session_id() -> Result<Option<String>> {
+    let sessions = list_sessions()?;
+    Ok(sessions.first().map(|s| s.id.clone()))
+}
+
+/// Auto-save session periodically (call after each message)
+impl Session {
+    pub fn auto_save(&self) -> Result<()> {
+        // Only save if we have messages
+        if self.messages.is_empty() {
+            return Ok(());
+        }
+        self.save()?;
+        Ok(())
+    }
+}

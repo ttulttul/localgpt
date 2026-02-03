@@ -10,7 +10,8 @@ pub use providers::{
     ToolSchema,
 };
 pub use session::{
-    get_sessions_dir_for_agent, get_state_dir, Session, SessionStatus, DEFAULT_AGENT_ID,
+    get_last_session_id, get_sessions_dir_for_agent, get_state_dir, list_sessions, Session,
+    SessionInfo, SessionStatus, DEFAULT_AGENT_ID,
 };
 pub use session_store::{SessionEntry, SessionStore};
 pub use system_prompt::{
@@ -485,5 +486,10 @@ impl Agent {
     /// Get tool schemas for external use
     pub fn tool_schemas(&self) -> Vec<ToolSchema> {
         self.tools.iter().map(|t| t.schema()).collect()
+    }
+
+    /// Auto-save session to disk (call after each message)
+    pub fn auto_save_session(&self) -> Result<()> {
+        self.session.auto_save()
     }
 }
