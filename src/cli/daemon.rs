@@ -11,6 +11,106 @@ use localgpt::heartbeat::HeartbeatRunner;
 use localgpt::memory::MemoryManager;
 use localgpt::server::Server;
 
+/// Fork and daemonize BEFORE starting the Tokio runtime.
+/// This avoids the macOS fork-safety issue with ObjC/Swift runtime.
+#[cfg(unix)]
+pub fn daemonize_and_run(agent_id: &str) -> Result<()> {
+    let config = Config::load()?;
+
+    // Check if already running
+    let pid_file = get_pid_file()?;
+    if pid_file.exists() {
+        let pid = fs::read_to_string(&pid_file)?;
+        if is_process_running(&pid) {
+            anyhow::bail!("Daemon already running (PID: {})", pid.trim());
+        }
+        fs::remove_file(&pid_file)?;
+    }
+
+    let log_file = get_log_file()?;
+
+    // Print startup info before daemonizing
+    println!(
+        "Starting LocalGPT daemon in background (agent: {})...",
+        agent_id
+    );
+    println!("  PID file: {}", pid_file.display());
+    println!("  Log file: {}", log_file.display());
+    if config.server.enabled {
+        println!(
+            "  Server: http://{}:{}",
+            config.server.bind, config.server.port
+        );
+    }
+    println!("\nUse 'localgpt daemon status' to check status");
+    println!("Use 'localgpt daemon stop' to stop\n");
+
+    // Fork BEFORE starting Tokio
+    let stdout = std::fs::File::create(&log_file)?;
+    let stderr = stdout.try_clone()?;
+
+    let daemonize = Daemonize::new()
+        .pid_file(&pid_file)
+        .working_directory(std::env::current_dir()?)
+        .stdout(stdout)
+        .stderr(stderr);
+
+    match daemonize.start() {
+        Ok(_) => {
+            // Now in the child process - safe to start Tokio
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()?
+                .block_on(run_daemon_server(config, agent_id))
+        }
+        Err(e) => anyhow::bail!("Failed to daemonize: {}", e),
+    }
+}
+
+/// Run the daemon server (called after fork in background mode)
+async fn run_daemon_server(config: Config, agent_id: &str) -> Result<()> {
+    // Initialize logging in the daemon process
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::new("info"))
+        .init();
+
+    let memory = MemoryManager::new_with_agent(&config.memory, agent_id)?;
+    let _watcher = memory.start_watcher()?;
+
+    println!("Daemon started successfully");
+
+    if config.server.enabled {
+        println!(
+            "  Server: http://{}:{}",
+            config.server.bind, config.server.port
+        );
+        if config.heartbeat.enabled {
+            println!(
+                "  Heartbeat: running separately (use 'localgpt daemon heartbeat' to trigger)"
+            );
+        }
+
+        let server = Server::new(&config)?;
+        server.run().await?;
+    } else if config.heartbeat.enabled {
+        println!(
+            "  Heartbeat: enabled (interval: {})",
+            config.heartbeat.interval
+        );
+        let runner = HeartbeatRunner::new(&config)?;
+        runner.run().await?;
+    } else {
+        println!("  Neither server nor heartbeat is enabled. Use Ctrl+C to stop.");
+        tokio::signal::ctrl_c().await?;
+    }
+
+    println!("\nShutting down...");
+    let pid_file = get_pid_file()?;
+    fs::remove_file(&pid_file).ok();
+
+    Ok(())
+}
+
 #[derive(Args)]
 pub struct DaemonArgs {
     #[command(subcommand)]
@@ -52,89 +152,41 @@ async fn start_daemon(foreground: bool, agent_id: &str) -> Result<()> {
     let pid_file = get_pid_file()?;
     if pid_file.exists() {
         let pid = fs::read_to_string(&pid_file)?;
-        // Check if process is still running
         if is_process_running(&pid) {
             anyhow::bail!("Daemon already running (PID: {})", pid.trim());
         }
-        // Stale PID file, remove it
         fs::remove_file(&pid_file)?;
     }
 
-    // Set up log file for daemon output
-    let log_file = get_log_file()?;
-
+    // Background mode on Unix is handled by daemonize_and_run() before Tokio starts
+    // This function only handles foreground mode and non-Unix platforms
     #[cfg(unix)]
     if !foreground {
-        // Print startup info before daemonizing (user won't see output after fork)
-        println!(
-            "Starting LocalGPT daemon in background (agent: {})...",
-            agent_id
-        );
-        println!("  PID file: {}", pid_file.display());
-        println!("  Log file: {}", log_file.display());
-        if config.server.enabled {
-            println!(
-                "  Server: http://{}:{}",
-                config.server.bind, config.server.port
-            );
-        }
-        println!("\nUse 'localgpt daemon status' to check status");
-        println!("Use 'localgpt daemon stop' to stop\n");
-
-        // Proper Unix daemonization
-        let stdout = std::fs::File::create(&log_file)?;
-        let stderr = stdout.try_clone()?;
-
-        let daemonize = Daemonize::new()
-            .pid_file(&pid_file)
-            .working_directory(std::env::current_dir()?)
-            .stdout(stdout)
-            .stderr(stderr);
-
-        match daemonize.start() {
-            Ok(_) => {
-                // We are now running in the background
-                // Continue with daemon setup below
-            }
-            Err(e) => anyhow::bail!("Failed to daemonize: {}", e),
-        }
-    } else {
-        println!(
-            "Starting LocalGPT daemon in foreground (agent: {})...",
-            agent_id
-        );
+        // This shouldn't be reached - background mode is handled in main()
+        anyhow::bail!("Background mode should be handled before Tokio starts");
     }
 
     #[cfg(not(unix))]
-    {
-        if !foreground {
-            println!(
-                "Note: Background daemonization not supported on this platform. Running in foreground."
-            );
-        }
-        println!("Starting LocalGPT daemon (agent: {})...", agent_id);
+    if !foreground {
+        println!(
+            "Note: Background daemonization not supported on this platform. Running in foreground."
+        );
     }
 
-    // Write PID file (only needed for foreground mode, daemonize handles it otherwise)
-    #[cfg(unix)]
-    if foreground {
-        fs::write(&pid_file, std::process::id().to_string())?;
-    }
+    println!(
+        "Starting LocalGPT daemon in foreground (agent: {})...",
+        agent_id
+    );
 
-    #[cfg(not(unix))]
+    // Write PID file for foreground mode
     fs::write(&pid_file, std::process::id().to_string())?;
 
     // Initialize components
     let memory = MemoryManager::new_with_agent(&config.memory, agent_id)?;
-
-    // Start memory file watcher
     let _watcher = memory.start_watcher()?;
 
     println!("Daemon started successfully");
 
-    // Run heartbeat if enabled, otherwise just run the server
-    // Note: We can't run both in parallel due to the SQLite/Send issue,
-    // so we prioritize the HTTP server for now
     if config.server.enabled {
         println!(
             "  Server: http://{}:{}",
@@ -157,13 +209,10 @@ async fn start_daemon(foreground: bool, agent_id: &str) -> Result<()> {
         runner.run().await?;
     } else {
         println!("  Neither server nor heartbeat is enabled. Use Ctrl+C to stop.");
-        // Just wait for shutdown signal
         tokio::signal::ctrl_c().await?;
     }
 
     println!("\nShutting down...");
-
-    // Cleanup
     fs::remove_file(&pid_file).ok();
 
     Ok(())
