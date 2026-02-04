@@ -1,14 +1,15 @@
 //! Workspace initialization and templates
 //!
-//! Creates default workspace files on first run, similar to OpenClaw's bootstrap.
+//! Creates default workspace files on first run.
 
 use anyhow::Result;
 use std::fs;
 use std::path::Path;
 use tracing::info;
 
-/// Initialize workspace with default templates if files don't exist
-pub fn init_workspace(workspace: &Path) -> Result<()> {
+/// Initialize workspace with default templates if files don't exist.
+/// Returns true if this is a brand new workspace (all key files were missing).
+pub fn init_workspace(workspace: &Path) -> Result<bool> {
     // Ensure directories exist
     fs::create_dir_all(workspace)?;
     fs::create_dir_all(workspace.join("memory"))?;
@@ -18,6 +19,14 @@ pub fn init_workspace(workspace: &Path) -> Result<()> {
     if let Some(state_dir) = workspace.parent() {
         init_state_dir(state_dir)?;
     }
+
+    // Check if this is a brand new workspace (all key files missing)
+    let key_files = [
+        workspace.join("MEMORY.md"),
+        workspace.join("HEARTBEAT.md"),
+        workspace.join("SOUL.md"),
+    ];
+    let is_brand_new = key_files.iter().all(|p| !p.exists());
 
     // Create MEMORY.md if it doesn't exist
     let memory_path = workspace.join("MEMORY.md");
@@ -47,14 +56,7 @@ pub fn init_workspace(workspace: &Path) -> Result<()> {
         info!("Created {}", gitignore_path.display());
     }
 
-    // Create BOOTSTRAP.md if it doesn't exist (OpenClaw-compatible: one-time first-run ritual)
-    let bootstrap_path = workspace.join("BOOTSTRAP.md");
-    if !bootstrap_path.exists() {
-        fs::write(&bootstrap_path, BOOTSTRAP_TEMPLATE)?;
-        info!("Created {}", bootstrap_path.display());
-    }
-
-    Ok(())
+    Ok(is_brand_new)
 }
 
 const MEMORY_TEMPLATE: &str = r#"# MEMORY.md - Long-term Memory
@@ -117,26 +119,6 @@ If you change this file, tell the user — it's your soul, and they should know.
 ---
 
 _This file is yours to evolve. As you learn who you are, update it._
-"#;
-
-const BOOTSTRAP_TEMPLATE: &str = r#"# BOOTSTRAP.md - First Run Setup
-
-This file is loaded ONLY on your first session with LocalGPT.
-Use it to introduce yourself and set up initial preferences.
-
-## First Things First
-
-Welcome! I'm your new AI assistant. Before we begin:
-
-1. **Who are you?** Tell me your name and how you'd like me to address you.
-2. **What's your style?** Do you prefer concise answers or detailed explanations?
-3. **Any preferences?** Time zone, communication style, topics you're interested in?
-
-I'll save what I learn to MEMORY.md so I remember it in future sessions.
-
----
-
-_After our first conversation, this file won't be loaded again. Feel free to delete it or keep it as a reminder of how we started._
 "#;
 
 const GITIGNORE_TEMPLATE: &str = r#"# LocalGPT workspace .gitignore

@@ -6,8 +6,10 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::pin::Pin;
+use std::process::Stdio;
 use std::sync::Mutex as StdMutex;
-use tracing::debug;
+use tokio::io::{AsyncBufReadExt, BufReader};
+use tracing::{debug, info};
 
 use crate::config::Config;
 
@@ -1137,6 +1139,162 @@ impl ClaudeCliProvider {
             cli_session_id: StdMutex::new(existing_session),
         })
     }
+
+    /// Execute Claude CLI command, retrying with a new session if the existing one is not found
+    async fn execute_cli_command(
+        &self,
+        prompt: &str,
+        system_prompt: Option<&str>,
+        existing_session: Option<&str>,
+    ) -> Result<(std::process::Output, bool)> {
+        use std::process::Command;
+
+        // First attempt: try with existing session if available
+        if let Some(cli_sid) = existing_session {
+            let args = self.build_cli_args(prompt, system_prompt, Some(cli_sid), false);
+
+            debug!(
+                "Claude CLI (resume): {} {:?} (cwd: {:?})",
+                self.command, args, self.workspace
+            );
+
+            let output = tokio::task::spawn_blocking({
+                let command = self.command.clone();
+                let args = args.clone();
+                let workspace = self.workspace.clone();
+                move || {
+                    Command::new(&command)
+                        .args(&args)
+                        .current_dir(&workspace)
+                        .output()
+                }
+            })
+            .await??;
+
+            if output.status.success() {
+                return Ok((output, false));
+            }
+
+            // Check if the error is "session not found" - if so, retry with new session
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if stderr.contains("No conversation found")
+                || stderr.contains("session")
+                    && (stderr.contains("not found") || stderr.contains("does not exist"))
+            {
+                info!(
+                    "Claude CLI session {} not found, creating new session",
+                    cli_sid
+                );
+                // Clear the invalid session from our state
+                if let Ok(mut cli_session) = self.cli_session_id.lock() {
+                    *cli_session = None;
+                }
+            } else {
+                // Some other error - propagate it
+                anyhow::bail!("Claude CLI failed: {}", stderr);
+            }
+        }
+
+        // Create new session
+        let args = self.build_cli_args(prompt, system_prompt, None, true);
+
+        debug!(
+            "Claude CLI (new): {} {:?} (cwd: {:?})",
+            self.command, args, self.workspace
+        );
+
+        let output = tokio::task::spawn_blocking({
+            let command = self.command.clone();
+            let args = args.clone();
+            let workspace = self.workspace.clone();
+            move || {
+                Command::new(&command)
+                    .args(&args)
+                    .current_dir(&workspace)
+                    .output()
+            }
+        })
+        .await??;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!("Claude CLI failed: {}", stderr);
+        }
+
+        Ok((output, true))
+    }
+
+    /// Build CLI arguments for a command
+    fn build_cli_args(
+        &self,
+        prompt: &str,
+        system_prompt: Option<&str>,
+        resume_session: Option<&str>,
+        is_new_session: bool,
+    ) -> Vec<String> {
+        self.build_cli_args_with_format(
+            prompt,
+            system_prompt,
+            resume_session,
+            is_new_session,
+            "json",
+        )
+    }
+
+    /// Build CLI arguments with a specific output format
+    fn build_cli_args_with_format(
+        &self,
+        prompt: &str,
+        system_prompt: Option<&str>,
+        resume_session: Option<&str>,
+        is_new_session: bool,
+        output_format: &str,
+    ) -> Vec<String> {
+        let mut args = vec![
+            "-p".to_string(),
+            "--output-format".to_string(),
+            output_format.to_string(),
+            "--dangerously-skip-permissions".to_string(),
+        ];
+
+        // Claude CLI requires --verbose when using stream-json with --print
+        // Also include partial messages for better visibility into internal process
+        if output_format == "stream-json" {
+            args.push("--verbose".to_string());
+            args.push("--include-partial-messages".to_string());
+        }
+
+        // Model (only on new sessions)
+        if is_new_session {
+            args.push("--model".to_string());
+            args.push(self.model.clone());
+        }
+
+        // System prompt (new sessions only)
+        // Use --system-prompt to SET the prompt (not --append-system-prompt which appends)
+        if is_new_session {
+            if let Some(sys) = system_prompt {
+                args.push("--system-prompt".to_string());
+                args.push(sys.to_string());
+            }
+        }
+
+        // CLI session handling
+        if let Some(cli_sid) = resume_session {
+            args.push("--resume".to_string());
+            args.push(cli_sid.to_string());
+        } else {
+            // New CLI session - generate UUID
+            let new_cli_session = uuid::Uuid::new_v4().to_string();
+            args.push("--session-id".to_string());
+            args.push(new_cli_session);
+        }
+
+        // Add prompt as final argument
+        args.push(prompt.to_string());
+
+        args
+    }
 }
 
 /// Load CLI session ID from session store
@@ -1224,8 +1382,6 @@ impl LLMProvider for ClaudeCliProvider {
         messages: &[Message],
         _tools: Option<&[ToolSchema]>, // Ignored - no tool support
     ) -> Result<LLMResponse> {
-        use std::process::Command;
-
         // Build prompt from messages (last user message)
         let prompt = build_prompt_from_messages(messages);
         let system_prompt = extract_system_prompt(messages);
@@ -1236,68 +1392,15 @@ impl LLMProvider for ClaudeCliProvider {
             .lock()
             .map_err(|e| anyhow::anyhow!("Session lock poisoned: {}", e))?
             .clone();
-        let is_first_turn = current_cli_session.is_none();
 
-        // Build command args
-        let mut args = vec![
-            "-p".to_string(),
-            "--output-format".to_string(),
-            "json".to_string(),
-            "--dangerously-skip-permissions".to_string(),
-        ];
-
-        // Model (only on new sessions)
-        if is_first_turn {
-            args.push("--model".to_string());
-            args.push(self.model.clone());
-        }
-
-        // System prompt (first turn only)
-        if is_first_turn {
-            if let Some(sys) = system_prompt {
-                args.push("--append-system-prompt".to_string());
-                args.push(sys);
-            }
-        }
-
-        // CLI session handling
-        if let Some(cli_sid) = &current_cli_session {
-            // Resume existing CLI session
-            args.push("--resume".to_string());
-            args.push(cli_sid.clone());
-        } else {
-            // New CLI session - generate UUID
-            let new_cli_session = uuid::Uuid::new_v4().to_string();
-            args.push("--session-id".to_string());
-            args.push(new_cli_session);
-        }
-
-        // Add prompt as final argument
-        args.push(prompt);
-
-        debug!(
-            "Claude CLI: {} {:?} (cwd: {:?})",
-            self.command, args, self.workspace
-        );
-
-        // Execute command (blocking - wrap in spawn_blocking for async)
-        let output = tokio::task::spawn_blocking({
-            let command = self.command.clone();
-            let args = args.clone();
-            let workspace = self.workspace.clone();
-            move || {
-                Command::new(&command)
-                    .args(&args)
-                    .current_dir(&workspace)
-                    .output()
-            }
-        })
-        .await??;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!("Claude CLI failed: {}", stderr);
-        }
+        // Try to execute with current session, fall back to new session if not found
+        let (output, used_new_session) = self
+            .execute_cli_command(
+                &prompt,
+                system_prompt.as_deref(),
+                current_cli_session.as_deref(),
+            )
+            .await?;
 
         // Parse JSON output and extract session ID
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -1319,6 +1422,10 @@ impl LLMProvider for ClaudeCliProvider {
                 new_cli_sid,
             ) {
                 debug!("Failed to persist CLI session: {}", e);
+            }
+
+            if used_new_session {
+                info!("Created new Claude CLI session: {}", new_cli_sid);
             }
         }
 
@@ -1344,7 +1451,287 @@ impl LLMProvider for ClaudeCliProvider {
         }
     }
 
-    // No streaming - uses default fallback (single chunk)
+    async fn chat_stream(
+        &self,
+        messages: &[Message],
+        _tools: Option<&[ToolSchema]>,
+    ) -> Result<StreamResult> {
+        // Build prompt from messages (last user message)
+        let prompt = build_prompt_from_messages(messages);
+        let system_prompt = extract_system_prompt(messages);
+
+        // Get current CLI session state
+        let current_cli_session = self
+            .cli_session_id
+            .lock()
+            .map_err(|e| anyhow::anyhow!("Session lock poisoned: {}", e))?
+            .clone();
+
+        // Determine if we're resuming or starting new
+        let (resume_session, is_new_session) = if let Some(ref sid) = current_cli_session {
+            (Some(sid.clone()), false)
+        } else {
+            (None, true)
+        };
+
+        // Build args with stream-json format
+        let args = self.build_cli_args_with_format(
+            &prompt,
+            system_prompt.as_deref(),
+            resume_session.as_deref(),
+            is_new_session,
+            "stream-json",
+        );
+
+        debug!(
+            "Claude CLI streaming: {} {:?} (cwd: {:?})",
+            self.command, args, self.workspace
+        );
+
+        // Spawn the CLI process with piped stdout
+        let mut child = tokio::process::Command::new(&self.command)
+            .args(&args)
+            .current_dir(&self.workspace)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| anyhow::anyhow!("Failed to spawn Claude CLI: {}", e))?;
+
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("Failed to capture stdout"))?;
+
+        // Clone session state for the stream closure
+        let cli_session_id = self.cli_session_id.lock().ok().and_then(|g| g.clone());
+        let session_key = self.session_key.clone();
+        let localgpt_session_id = self.localgpt_session_id.clone();
+        let cli_session_mutex = std::sync::Arc::new(StdMutex::new(cli_session_id));
+
+        // Create the stream
+        let stream = async_stream::stream! {
+            let reader = BufReader::new(stdout);
+            let mut lines = reader.lines();
+            let mut accumulated_text = String::new();
+            let mut session_id_captured: Option<String> = None;
+            let mut last_text_len = 0;
+            let mut shown_tool_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+            let mut pending_tools: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+
+            while let Ok(Some(line)) = lines.next_line().await {
+                if line.is_empty() {
+                    continue;
+                }
+
+                // Parse the JSON line
+                if let Ok(json) = serde_json::from_str::<Value>(&line) {
+                    let event_type = json["type"].as_str().unwrap_or("");
+
+                    match event_type {
+                        // System init - show model info
+                        "system" => {
+                            if json.get("subtype").and_then(|v| v.as_str()) == Some("init") {
+                                if let Some(model) = json.get("model").and_then(|v| v.as_str()) {
+                                    let tools_count = json.get("tools")
+                                        .and_then(|v| v.as_array())
+                                        .map(|a| a.len())
+                                        .unwrap_or(0);
+                                    yield Ok(StreamChunk {
+                                        delta: format!("[Model: {} | Tools: {}]\n", model, tools_count),
+                                        done: false,
+                                        tool_calls: None,
+                                    });
+                                }
+                            }
+                        }
+
+                        // Assistant message with content (streaming updates)
+                        "assistant" => {
+                            // Extract text and tool_use from message.content array
+                            if let Some(content_array) = json["message"]["content"].as_array() {
+                                for block in content_array {
+                                    if block["type"] == "text" {
+                                        if let Some(text) = block["text"].as_str() {
+                                            accumulated_text = text.to_string();
+                                        }
+                                    } else if block["type"] == "tool_use" {
+                                        // Show tool call as it happens
+                                        let tool_id = block["id"].as_str().unwrap_or("").to_string();
+                                        let tool_name = block["name"].as_str().unwrap_or("unknown");
+
+                                        // Only show each tool call once
+                                        if !shown_tool_ids.contains(&tool_id) {
+                                            shown_tool_ids.insert(tool_id.clone());
+                                            pending_tools.insert(tool_id, tool_name.to_string());
+
+                                            // Format tool details
+                                            let detail = if let Some(input) = block.get("input") {
+                                                match tool_name {
+                                                    "Bash" => input.get("command")
+                                                        .and_then(|v| v.as_str())
+                                                        .map(|s| if s.len() > 60 { format!("{}...", &s[..57]) } else { s.to_string() }),
+                                                    "Read" | "Edit" | "Write" => input.get("file_path")
+                                                        .or_else(|| input.get("path"))
+                                                        .and_then(|v| v.as_str())
+                                                        .map(|s| s.to_string()),
+                                                    "Grep" | "Glob" => input.get("pattern")
+                                                        .and_then(|v| v.as_str())
+                                                        .map(|s| format!("\"{}\"", s)),
+                                                    "WebFetch" => input.get("url")
+                                                        .and_then(|v| v.as_str())
+                                                        .map(|s| s.to_string()),
+                                                    "Task" => input.get("description")
+                                                        .and_then(|v| v.as_str())
+                                                        .map(|s| s.to_string()),
+                                                    _ => None,
+                                                }
+                                            } else {
+                                                None
+                                            };
+
+                                            let tool_msg = if let Some(d) = detail {
+                                                format!("\n[{}: {}]", tool_name, d)
+                                            } else {
+                                                format!("\n[{}]", tool_name)
+                                            };
+
+                                            yield Ok(StreamChunk {
+                                                delta: tool_msg,
+                                                done: false,
+                                                tool_calls: None,
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Calculate delta (new text since last update)
+                            if accumulated_text.len() > last_text_len {
+                                let delta = accumulated_text[last_text_len..].to_string();
+                                last_text_len = accumulated_text.len();
+                                yield Ok(StreamChunk {
+                                    delta,
+                                    done: false,
+                                    tool_calls: None,
+                                });
+                            }
+                        }
+
+                        // Tool result - show completion
+                        "user" => {
+                            if let Some(content_array) = json["message"]["content"].as_array() {
+                                for block in content_array {
+                                    if block["type"] == "tool_result" {
+                                        let tool_id = block["tool_use_id"].as_str().unwrap_or("");
+                                        let is_error = block.get("is_error")
+                                            .and_then(|v| v.as_bool())
+                                            .unwrap_or(false);
+
+                                        // Get tool name from pending_tools
+                                        let _tool_name = pending_tools.remove(tool_id);
+
+                                        let status = if is_error { "failed" } else { "done" };
+                                        yield Ok(StreamChunk {
+                                            delta: format!(" [{}]\n", status),
+                                            done: false,
+                                            tool_calls: None,
+                                        });
+                                    }
+                                }
+                            }
+                        }
+
+                        // Result event contains session_id and final result
+                        "result" => {
+                            // Capture session_id for resume
+                            if let Some(sid) = json.get("session_id").and_then(|v| v.as_str()) {
+                                session_id_captured = Some(sid.to_string());
+
+                                // Update the session state
+                                if let Ok(mut guard) = cli_session_mutex.lock() {
+                                    *guard = Some(sid.to_string());
+                                }
+
+                                // Persist to session store
+                                if let Err(e) = save_cli_session_to_store(
+                                    &session_key,
+                                    &localgpt_session_id,
+                                    CLAUDE_CLI_PROVIDER,
+                                    sid,
+                                ) {
+                                    debug!("Failed to persist CLI session: {}", e);
+                                }
+
+                                debug!("Claude CLI session captured: {}", sid);
+                            }
+
+                            // Get final result text (may have more content than accumulated)
+                            if let Some(result_text) = json.get("result").and_then(|v| v.as_str()) {
+                                // Emit any remaining text not yet sent
+                                if result_text.len() > last_text_len {
+                                    let delta = result_text[last_text_len..].to_string();
+                                    if !delta.is_empty() {
+                                        yield Ok(StreamChunk {
+                                            delta,
+                                            done: false,
+                                            tool_calls: None,
+                                        });
+                                    }
+                                }
+                            }
+
+                            // Signal completion
+                            yield Ok(StreamChunk {
+                                delta: String::new(),
+                                done: true,
+                                tool_calls: None,
+                            });
+                        }
+
+                        // Handle errors
+                        "error" => {
+                            let error_msg = json.get("error")
+                                .and_then(|e| e.get("message"))
+                                .and_then(|m| m.as_str())
+                                .unwrap_or("Unknown CLI error");
+                            yield Err(anyhow::anyhow!("Claude CLI error: {}", error_msg));
+                        }
+
+                        _ => {
+                            // Ignore other event types (e.g., "system", "tool_use", etc.)
+                            debug!("Ignoring CLI stream event type: {}", event_type);
+                        }
+                    }
+                }
+            }
+
+            // Wait for the process to complete
+            match child.wait().await {
+                Ok(status) if !status.success() => {
+                    // Try to read stderr for error details
+                    if let Some(mut stderr) = child.stderr.take() {
+                        let mut error_buf = String::new();
+                        use tokio::io::AsyncReadExt;
+                        let _ = stderr.read_to_string(&mut error_buf).await;
+                        if !error_buf.is_empty() {
+                            yield Err(anyhow::anyhow!("Claude CLI failed: {}", error_buf));
+                        }
+                    }
+                }
+                Err(e) => {
+                    yield Err(anyhow::anyhow!("Failed to wait for CLI process: {}", e));
+                }
+                _ => {}
+            }
+
+            // Update the provider's session state if we captured a new session ID
+            if let Some(ref new_sid) = session_id_captured {
+                info!("Claude CLI streaming session: {}", new_sid);
+            }
+        };
+
+        Ok(Box::pin(stream))
+    }
 }
 
 #[cfg(test)]

@@ -70,12 +70,34 @@ LocalGPT is a local-only AI assistant with persistent markdown-based memory and 
 
 Default config path: `~/.localgpt/config.toml` (see `config.example.toml`)
 
+**Auto-creation**: If no config file exists on first run, LocalGPT automatically creates a default config with helpful comments. If an OpenClaw config exists at `~/.openclaw/config.json5`, it will be migrated automatically.
+
 Key settings:
 - `agent.default_model` - Model name (determines provider). Default: `claude-cli/opus`
 - `agent.context_window` / `reserve_tokens` - Context management
+- `memory.workspace` - Workspace directory path. Default: `~/.localgpt/workspace`
 - `heartbeat.interval` - Duration string (e.g., "30m", "1h")
 - `heartbeat.active_hours` - Optional `{start, end}` in "HH:MM" format
 - `server.port` - HTTP server port (default: 31327)
+
+### Workspace Path Customization (OpenClaw-Compatible)
+
+Workspace path resolution order:
+1. `LOCALGPT_WORKSPACE` env var - absolute path override
+2. `LOCALGPT_PROFILE` env var - creates `~/.localgpt/workspace-{profile}`
+3. `memory.workspace` from config file
+4. Default: `~/.localgpt/workspace`
+
+Examples:
+```bash
+# Use a custom workspace directory
+export LOCALGPT_WORKSPACE=~/my-project/ai-workspace
+localgpt chat
+
+# Use profile-based workspaces (like OpenClaw's OPENCLAW_PROFILE)
+export LOCALGPT_PROFILE=work    # uses ~/.localgpt/workspace-work
+export LOCALGPT_PROFILE=home    # uses ~/.localgpt/workspace-home
+```
 
 ## Skills System (OpenClaw-Compatible)
 
@@ -184,7 +206,6 @@ OpenClaw workspace files are fully supported. Copy them directly:
 | `IDENTITY.md` | Agent name, vibe, emoji | ✅ Loaded |
 | `TOOLS.md` | Notes about local tools and conventions | ✅ Loaded |
 | `AGENTS.md` | Operating instructions for the agent | ✅ Loaded |
-| `BOOTSTRAP.md` | One-time first-run ritual | ✅ First session only |
 | `memory/*.md` | Daily logs (YYYY-MM-DD.md format) | ✅ Full |
 | `knowledge/` | Structured knowledge repository | ✅ Indexed |
 | `skills/*/SKILL.md` | Specialized task instructions | ✅ Full |

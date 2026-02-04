@@ -29,6 +29,8 @@ pub struct MemoryManager {
     config: MemoryConfig,
     /// Optional embedding provider for semantic search
     embedding_provider: Option<Arc<dyn EmbeddingProvider>>,
+    /// True if this was a brand new workspace (first run)
+    is_brand_new: bool,
 }
 
 #[derive(Debug)]
@@ -65,8 +67,8 @@ impl MemoryManager {
         let workspace = shellexpand::tilde(&config.workspace).to_string();
         let workspace = PathBuf::from(workspace);
 
-        // Initialize workspace with templates if needed
-        init_workspace(&workspace)?;
+        // Initialize workspace with templates if needed, returns true if brand new
+        let is_brand_new = init_workspace(&workspace)?;
 
         // Database goes in state_dir/memory/{agentId}.sqlite (OpenClaw-compatible)
         let state_dir = workspace
@@ -85,6 +87,7 @@ impl MemoryManager {
             index,
             config: config.clone(),
             embedding_provider: None,
+            is_brand_new,
         })
     }
 
@@ -163,14 +166,9 @@ impl MemoryManager {
         }
     }
 
-    /// Read the BOOTSTRAP.md file (OpenClaw-compatible: one-time first-run ritual)
-    pub fn read_bootstrap_file(&self) -> Result<String> {
-        let path = self.workspace.join("BOOTSTRAP.md");
-        if path.exists() {
-            Ok(fs::read_to_string(&path)?)
-        } else {
-            Ok(String::new())
-        }
+    /// Check if this is a brand new workspace (first run)
+    pub fn is_brand_new(&self) -> bool {
+        self.is_brand_new
     }
 
     /// Read the TOOLS.md file (OpenClaw-compatible: local tool notes)

@@ -11,6 +11,56 @@ use localgpt::heartbeat::HeartbeatRunner;
 use localgpt::memory::MemoryManager;
 use localgpt::server::Server;
 
+/// Synchronously stop the daemon (for use before Tokio runtime starts)
+pub fn stop_sync() -> Result<()> {
+    let pid_file = get_pid_file()?;
+
+    if !pid_file.exists() {
+        println!("Daemon is not running");
+        return Ok(());
+    }
+
+    let pid = fs::read_to_string(&pid_file)?.trim().to_string();
+
+    if !is_process_running(&pid) {
+        println!("Daemon is not running (stale PID file)");
+        fs::remove_file(&pid_file)?;
+        return Ok(());
+    }
+
+    println!("Stopping daemon (PID: {})...", pid);
+
+    // Send SIGTERM
+    #[cfg(unix)]
+    {
+        use std::process::Command;
+        Command::new("kill").args(["-TERM", &pid]).status()?;
+    }
+
+    #[cfg(windows)]
+    {
+        use std::process::Command;
+        Command::new("taskkill").args(["/PID", &pid]).status()?;
+    }
+
+    // Wait for process to stop (up to 5 seconds)
+    for _ in 0..50 {
+        if !is_process_running(&pid) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+
+    if is_process_running(&pid) {
+        anyhow::bail!("Failed to stop daemon (PID: {})", pid);
+    }
+
+    println!("Daemon stopped");
+    fs::remove_file(&pid_file).ok();
+
+    Ok(())
+}
+
 /// Fork and daemonize BEFORE starting the Tokio runtime.
 /// This avoids the macOS fork-safety issue with ObjC/Swift runtime.
 #[cfg(unix)]
@@ -157,6 +207,13 @@ pub enum DaemonCommands {
     /// Stop the daemon
     Stop,
 
+    /// Restart the daemon (stop then start)
+    Restart {
+        /// Run in foreground (don't daemonize)
+        #[arg(short, long)]
+        foreground: bool,
+    },
+
     /// Show daemon status
     Status,
 
@@ -168,6 +225,7 @@ pub async fn run(args: DaemonArgs, agent_id: &str) -> Result<()> {
     match args.command {
         DaemonCommands::Start { foreground } => start_daemon(foreground, agent_id).await,
         DaemonCommands::Stop => stop_daemon().await,
+        DaemonCommands::Restart { foreground } => restart_daemon(foreground, agent_id).await,
         DaemonCommands::Status => show_status().await,
         DaemonCommands::Heartbeat => run_heartbeat_once(agent_id).await,
     }
@@ -258,6 +316,56 @@ async fn stop_daemon() -> Result<()> {
     Ok(())
 }
 
+async fn restart_daemon(foreground: bool, agent_id: &str) -> Result<()> {
+    // Stop the daemon if running
+    let pid_file = get_pid_file()?;
+    if pid_file.exists() {
+        let pid = fs::read_to_string(&pid_file)?.trim().to_string();
+        if is_process_running(&pid) {
+            println!("Stopping daemon (PID: {})...", pid);
+
+            #[cfg(unix)]
+            {
+                use std::process::Command;
+                Command::new("kill").args(["-TERM", &pid]).status()?;
+            }
+
+            #[cfg(windows)]
+            {
+                use std::process::Command;
+                Command::new("taskkill").args(["/PID", &pid]).status()?;
+            }
+
+            // Wait for process to stop (up to 5 seconds)
+            for _ in 0..50 {
+                if !is_process_running(&pid) {
+                    break;
+                }
+                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+            }
+
+            if is_process_running(&pid) {
+                anyhow::bail!("Failed to stop daemon (PID: {})", pid);
+            }
+
+            println!("Daemon stopped");
+        }
+        fs::remove_file(&pid_file).ok();
+    }
+
+    // For background mode on Unix, we need to exit and let main() handle daemonization
+    #[cfg(unix)]
+    if !foreground {
+        println!("\nTo start daemon in background, run: localgpt daemon start");
+        println!("(Background restart requires re-running the command due to fork requirements)");
+        return Ok(());
+    }
+
+    // Start in foreground mode
+    println!();
+    start_daemon(foreground, agent_id).await
+}
+
 async fn show_status() -> Result<()> {
     let config = Config::load()?;
     let pid_file = get_pid_file()?;
@@ -286,7 +394,7 @@ async fn show_status() -> Result<()> {
     println!("  Server enabled: {}", config.server.enabled);
     if config.server.enabled {
         println!(
-            "  Server address: {}:{}",
+            "  Server address: http://{}:{}",
             config.server.bind, config.server.port
         );
     }

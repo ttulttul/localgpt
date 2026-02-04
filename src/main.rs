@@ -8,12 +8,20 @@ use cli::{Cli, Commands};
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    // Handle daemon start specially - must fork BEFORE starting Tokio runtime
+    // Handle daemon start/restart specially - must fork BEFORE starting Tokio runtime
     #[cfg(unix)]
     if let Commands::Daemon(ref args) = cli.command {
-        if let cli::daemon::DaemonCommands::Start { foreground: false } = args.command {
-            // Do the fork synchronously, then start Tokio in the child
-            return cli::daemon::daemonize_and_run(&cli.agent);
+        match args.command {
+            cli::daemon::DaemonCommands::Start { foreground: false } => {
+                // Do the fork synchronously, then start Tokio in the child
+                return cli::daemon::daemonize_and_run(&cli.agent);
+            }
+            cli::daemon::DaemonCommands::Restart { foreground: false } => {
+                // Stop first (synchronously), then fork and start
+                cli::daemon::stop_sync()?;
+                return cli::daemon::daemonize_and_run(&cli.agent);
+            }
+            _ => {}
         }
     }
 

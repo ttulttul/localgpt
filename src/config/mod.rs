@@ -331,10 +331,14 @@ impl Config {
         if !path.exists() {
             // Try to migrate from OpenClaw config
             if let Some(migrated) = try_migrate_openclaw_config() {
+                // Save migrated config to disk
+                migrated.save()?;
                 return Ok(migrated);
             }
-            // Return default config if no config exists
-            return Ok(Config::default());
+            // Create default config file on first run
+            let config = Config::default();
+            config.save_with_template()?;
+            return Ok(config);
         }
 
         let content = fs::read_to_string(&path)?;
@@ -356,6 +360,21 @@ impl Config {
 
         let content = toml::to_string_pretty(self)?;
         fs::write(&path, content)?;
+
+        Ok(())
+    }
+
+    /// Save config with a helpful template (for first-time setup)
+    pub fn save_with_template(&self) -> Result<()> {
+        let path = Self::config_path()?;
+
+        // Create parent directories
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+
+        fs::write(&path, DEFAULT_CONFIG_TEMPLATE)?;
+        eprintln!("Created default config at {}", path.display());
 
         Ok(())
     }
@@ -415,7 +434,36 @@ impl Config {
     }
 
     /// Get workspace path, expanded
+    ///
+    /// Resolution order (like OpenClaw):
+    /// 1. LOCALGPT_WORKSPACE env var (absolute path override)
+    /// 2. LOCALGPT_PROFILE env var (creates ~/.localgpt/workspace-{profile})
+    /// 3. memory.workspace from config file
+    /// 4. Default: ~/.localgpt/workspace
     pub fn workspace_path(&self) -> PathBuf {
+        // Check for direct workspace override
+        if let Ok(workspace) = std::env::var("LOCALGPT_WORKSPACE") {
+            let trimmed = workspace.trim();
+            if !trimmed.is_empty() {
+                let expanded = shellexpand::tilde(trimmed);
+                return PathBuf::from(expanded.to_string());
+            }
+        }
+
+        // Check for profile-based workspace (like OpenClaw's OPENCLAW_PROFILE)
+        if let Ok(profile) = std::env::var("LOCALGPT_PROFILE") {
+            let trimmed = profile.trim().to_lowercase();
+            if !trimmed.is_empty() && trimmed != "default" {
+                let base = directories::BaseDirs::new()
+                    .map(|b| b.home_dir().to_path_buf())
+                    .unwrap_or_else(|| PathBuf::from("~"));
+                return base
+                    .join(".localgpt")
+                    .join(format!("workspace-{}", trimmed));
+            }
+        }
+
+        // Use config value
         let expanded = shellexpand::tilde(&self.memory.workspace);
         PathBuf::from(expanded.to_string())
     }
@@ -430,3 +478,50 @@ fn expand_env(s: &str) -> String {
         s.to_string()
     }
 }
+
+/// Default config template with helpful comments (used for first-time setup)
+const DEFAULT_CONFIG_TEMPLATE: &str = r#"# LocalGPT Configuration
+# Auto-created on first run. Edit as needed.
+
+[agent]
+# Default model: claude-cli/opus, anthropic/claude-sonnet-4-5, openai/gpt-4o, etc.
+default_model = "claude-cli/opus"
+context_window = 128000
+reserve_tokens = 8000
+
+# Anthropic API (for anthropic/* models)
+# [providers.anthropic]
+# api_key = "${ANTHROPIC_API_KEY}"
+
+# OpenAI API (for openai/* models)
+# [providers.openai]
+# api_key = "${OPENAI_API_KEY}"
+
+# Claude CLI (for claude-cli/* models, requires claude CLI installed)
+[providers.claude_cli]
+command = "claude"
+
+[heartbeat]
+enabled = true
+interval = "30m"
+
+# Only run during these hours (optional)
+# [heartbeat.active_hours]
+# start = "09:00"
+# end = "22:00"
+
+[memory]
+# Workspace directory for memory files (MEMORY.md, HEARTBEAT.md, etc.)
+# Can also be set via environment variables:
+#   LOCALGPT_WORKSPACE=/path/to/workspace  - absolute path override
+#   LOCALGPT_PROFILE=work                  - uses ~/.localgpt/workspace-work
+workspace = "~/.localgpt/workspace"
+
+[server]
+enabled = true
+port = 31327
+bind = "127.0.0.1"
+
+[logging]
+level = "info"
+"#;

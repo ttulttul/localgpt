@@ -343,19 +343,11 @@ impl Agent {
     async fn build_memory_context(&self) -> Result<String> {
         let mut context = String::new();
 
-        // Check if this is the first session (no existing sessions)
-        let is_first_session = list_sessions().map(|s| s.is_empty()).unwrap_or(true);
-
-        // Load BOOTSTRAP.md only on first run (OpenClaw-compatible: one-time ritual)
-        if is_first_session {
-            if let Ok(bootstrap_content) = self.memory.read_bootstrap_file() {
-                if !bootstrap_content.is_empty() {
-                    context.push_str("# First Run Setup (BOOTSTRAP.md)\n\n");
-                    context.push_str(&bootstrap_content);
-                    context.push_str("\n\n---\n\n");
-                    info!("Loaded BOOTSTRAP.md for first-run setup");
-                }
-            }
+        // Show welcome message on brand new workspace (first run)
+        if self.memory.is_brand_new() {
+            context.push_str(FIRST_RUN_WELCOME);
+            context.push_str("\n\n---\n\n");
+            info!("First run detected - showing welcome message");
         }
 
         // Load IDENTITY.md first (OpenClaw-compatible: agent identity context)
@@ -900,3 +892,22 @@ impl Agent {
         self.session.auto_save()
     }
 }
+
+/// Welcome message shown on first run (brand new workspace)
+const FIRST_RUN_WELCOME: &str = r#"# Welcome to LocalGPT
+
+This is your first session. I've set up a fresh workspace for you.
+
+## Quick Start
+
+1. **Just chat** - I'm ready to help with coding, writing, research, or anything else
+2. **Your memory files** are in the workspace:
+   - `MEMORY.md` - I'll remember important things here
+   - `SOUL.md` - Customize my personality and behavior
+   - `HEARTBEAT.md` - Tasks for autonomous mode
+
+## Tell Me About Yourself
+
+What's your name? What kind of projects do you work on? Any preferences for how I should communicate?
+
+I'll save what I learn to MEMORY.md so I remember it next time."#;
