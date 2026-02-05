@@ -63,6 +63,8 @@ struct SessionEntry {
 struct AppState {
     config: Config,
     sessions: Mutex<HashMap<String, SessionEntry>>,
+    /// Shared MemoryManager to avoid reinitializing embedding provider
+    memory: MemoryManager,
 }
 
 impl Server {
@@ -73,9 +75,13 @@ impl Server {
     }
 
     pub async fn run(&self) -> Result<()> {
+        // Create shared MemoryManager once to avoid reinitializing embedding provider
+        let memory = MemoryManager::new_with_full_config(&self.config.memory, Some(&self.config), "main")?;
+
         let state = Arc::new(AppState {
             config: self.config.clone(),
             sessions: Mutex::new(HashMap::new()),
+            memory,
         });
 
         // Load persisted sessions on startup
@@ -188,19 +194,13 @@ async fn load_persisted_sessions(state: &Arc<AppState>) -> Result<(), anyhow::Er
     let mut loaded = 0;
 
     for session_info in sessions_list.into_iter().take(MAX_SESSIONS) {
-        let memory = MemoryManager::new_with_full_config(
-            &state.config.memory,
-            Some(&state.config),
-            HTTP_AGENT_ID,
-        )?;
-
         let agent_config = AgentConfig {
             model: state.config.agent.default_model.clone(),
             context_window: state.config.agent.context_window,
             reserve_tokens: state.config.agent.reserve_tokens,
         };
 
-        let mut agent = Agent::new(agent_config, &state.config, memory).await?;
+        let mut agent = Agent::new(agent_config, &state.config, state.memory.clone()).await?;
 
         // Try to resume the session
         if agent.resume_session(&session_info.id).await.is_ok() {
@@ -279,20 +279,13 @@ async fn get_or_create_session(
     // Create new session
     let new_id = session_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
-    let memory = MemoryManager::new_with_full_config(
-        &state.config.memory,
-        Some(&state.config),
-        HTTP_AGENT_ID,
-    )
-    .map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
     let agent_config = AgentConfig {
         model: state.config.agent.default_model.clone(),
         context_window: state.config.agent.context_window,
         reserve_tokens: state.config.agent.reserve_tokens,
     };
 
-    let mut agent = Agent::new(agent_config, &state.config, memory)
+    let mut agent = Agent::new(agent_config, &state.config, state.memory.clone())
         .await
         .map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
@@ -354,14 +347,12 @@ struct StatusResponse {
 }
 
 async fn status(State(state): State<Arc<AppState>>) -> Json<StatusResponse> {
-    // Use FTS-only for status (no need for embeddings just to count chunks)
-    let memory = MemoryManager::new_with_agent(&state.config.memory, "main").ok();
     let sessions = state.sessions.lock().await;
 
     Json(StatusResponse {
         version: env!("CARGO_PKG_VERSION").to_string(),
         model: state.config.agent.default_model.clone(),
-        memory_chunks: memory.and_then(|m| m.chunk_count().ok()).unwrap_or(0),
+        memory_chunks: state.memory.chunk_count().unwrap_or(0),
         active_sessions: sessions.len(),
     })
 }
@@ -780,19 +771,17 @@ async fn memory_search(
     State(state): State<Arc<AppState>>,
     Query(query): Query<SearchQuery>,
 ) -> Response {
-    match memory_search_inner(&state.config, &query.q, query.limit) {
+    match memory_search_inner(&state.memory, &query.q, query.limit) {
         Ok(response) => Json(response).into_response(),
         Err(e) => AppError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }
 
 fn memory_search_inner(
-    config: &Config,
+    memory: &MemoryManager,
     query: &str,
     limit: Option<usize>,
 ) -> Result<SearchResponse, anyhow::Error> {
-    let memory = MemoryManager::new_with_full_config(&config.memory, Some(config), "main")?;
-
     let limit = limit.unwrap_or(10);
     let results = memory.search(query, limit)?;
 
@@ -823,17 +812,13 @@ struct StatsResponse {
 }
 
 async fn memory_stats(State(state): State<Arc<AppState>>) -> Response {
-    match memory_stats_inner(&state.config.memory) {
+    match memory_stats_inner(&state.memory) {
         Ok(response) => Json(response).into_response(),
         Err(e) => AppError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }
 
-fn memory_stats_inner(
-    config: &crate::config::MemoryConfig,
-) -> Result<StatsResponse, anyhow::Error> {
-    // Stats don't need embeddings
-    let memory = MemoryManager::new_with_agent(config, "main")?;
+fn memory_stats_inner(memory: &MemoryManager) -> Result<StatsResponse, anyhow::Error> {
     let stats = memory.stats()?;
 
     Ok(StatsResponse {
@@ -864,10 +849,10 @@ async fn memory_reindex(
     Json(request): Json<ReindexRequest>,
 ) -> Response {
     // Run reindex in blocking task since it uses sqlite
-    let config = state.config.memory.clone();
+    let memory = state.memory.clone();
     let force = request.force;
 
-    match tokio::task::spawn_blocking(move || memory_reindex_inner(&config, force)).await {
+    match tokio::task::spawn_blocking(move || memory_reindex_inner(&memory, force)).await {
         Ok(Ok(response)) => Json(response).into_response(),
         Ok(Err(e)) => AppError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
         Err(e) => AppError(
@@ -879,11 +864,9 @@ async fn memory_reindex(
 }
 
 fn memory_reindex_inner(
-    config: &crate::config::MemoryConfig,
+    memory: &MemoryManager,
     force: bool,
 ) -> Result<ReindexResponse, anyhow::Error> {
-    // Reindex doesn't need embeddings (embedding generation is separate)
-    let memory = MemoryManager::new_with_agent(config, "main")?;
     let stats = memory.reindex(force)?;
 
     Ok(ReindexResponse {
