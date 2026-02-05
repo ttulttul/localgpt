@@ -191,8 +191,11 @@ impl HeartbeatRunner {
         let mut agent = Agent::new(agent_config, &self.config, memory).await?;
         agent.new_session().await?;
 
+        // Check if workspace is a git repo
+        let workspace_is_git = self.workspace.join(".git").exists();
+
         // Send heartbeat prompt
-        let heartbeat_prompt = build_heartbeat_prompt();
+        let heartbeat_prompt = build_heartbeat_prompt(workspace_is_git);
         let response = agent.chat(&heartbeat_prompt).await?;
 
         // Determine status based on response

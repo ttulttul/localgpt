@@ -240,12 +240,19 @@ fn get_tool_summary(tool_name: &str) -> &'static str {
 }
 
 /// Build the heartbeat prompt for autonomous task polling
-pub fn build_heartbeat_prompt() -> String {
+/// If workspace_is_git is true, includes instruction to commit changes
+pub fn build_heartbeat_prompt(workspace_is_git: bool) -> String {
+    let git_instruction = if workspace_is_git {
+        " After completing tasks that modify files, commit the changes with a descriptive message."
+    } else {
+        ""
+    };
     format!(
         "Read HEARTBEAT.md if it exists. Follow it strictly. \
-         Do not infer or repeat old tasks from prior chats. \
+         Mark completed tasks with [x] — do NOT delete or clear tasks. \
+         Do not infer or repeat old tasks from prior chats.{} \
          If nothing needs attention, reply {}.",
-        HEARTBEAT_OK_TOKEN
+        git_instruction, HEARTBEAT_OK_TOKEN
     )
 }
 
