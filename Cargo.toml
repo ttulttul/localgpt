@@ -86,6 +86,7 @@ eframe = { version = "0.30", default-features = false, features = [
     "default_fonts",
     "glow",
     "persistence",
+    "x11",
 ] }
 
 # Unix daemonization (optional, only for daemon mode)
