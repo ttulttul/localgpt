@@ -16,11 +16,7 @@ use std::path::Path;
 /// These are security-critical files whose integrity must be maintained
 /// by the user (via CLI) or the security system itself — never by the
 /// agent's tool calls.
-pub const PROTECTED_FILES: &[&str] = &[
-    "LocalGPT.md",
-    ".localgpt_manifest.json",
-    "IDENTITY.md",
-];
+pub const PROTECTED_FILES: &[&str] = &["LocalGPT.md", ".localgpt_manifest.json", "IDENTITY.md"];
 
 /// Files outside the workspace (in the state directory) that the agent
 /// must not access.
@@ -28,10 +24,7 @@ pub const PROTECTED_FILES: &[&str] = &[
 /// The device key and audit log live in `~/.localgpt/` (the state
 /// directory), which is outside the workspace and not indexed by memory.
 /// These paths are checked as filename suffixes for defense in depth.
-pub const PROTECTED_EXTERNAL_PATHS: &[&str] = &[
-    ".device_key",
-    ".security_audit.jsonl",
-];
+pub const PROTECTED_EXTERNAL_PATHS: &[&str] = &[".device_key", ".security_audit.jsonl"];
 
 /// Check if a workspace-relative filename is protected from agent writes.
 ///
@@ -152,7 +145,9 @@ mod tests {
     #[test]
     fn path_with_directory_checks_filename() {
         assert!(is_workspace_file_protected("workspace/LocalGPT.md"));
-        assert!(is_workspace_file_protected("/home/user/.localgpt/workspace/IDENTITY.md"));
+        assert!(is_workspace_file_protected(
+            "/home/user/.localgpt/workspace/IDENTITY.md"
+        ));
     }
 
     #[test]

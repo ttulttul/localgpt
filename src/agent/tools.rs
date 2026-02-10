@@ -28,6 +28,10 @@ pub fn create_default_tools(
     memory: Option<Arc<MemoryManager>>,
 ) -> Result<Vec<Box<dyn Tool>>> {
     let workspace = config.workspace_path();
+    let state_dir = workspace
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("~/.localgpt"))
+        .to_path_buf();
 
     // Use indexed memory search if MemoryManager is provided, otherwise fallback to grep-based
     let memory_search_tool: Box<dyn Tool> = if let Some(ref mem) = memory {
@@ -37,10 +41,13 @@ pub fn create_default_tools(
     };
 
     Ok(vec![
-        Box::new(BashTool::new(config.tools.bash_timeout_ms)),
+        Box::new(BashTool::new(
+            config.tools.bash_timeout_ms,
+            state_dir.clone(),
+        )),
         Box::new(ReadFileTool::new()),
-        Box::new(WriteFileTool::new()),
-        Box::new(EditFileTool::new()),
+        Box::new(WriteFileTool::new(state_dir.clone())),
+        Box::new(EditFileTool::new(state_dir)),
         memory_search_tool,
         Box::new(MemoryGetTool::new(workspace)),
         Box::new(WebFetchTool::new(config.tools.web_fetch_max_bytes)),
@@ -50,11 +57,15 @@ pub fn create_default_tools(
 // Bash Tool
 pub struct BashTool {
     default_timeout_ms: u64,
+    state_dir: PathBuf,
 }
 
 impl BashTool {
-    pub fn new(default_timeout_ms: u64) -> Self {
-        Self { default_timeout_ms }
+    pub fn new(default_timeout_ms: u64, state_dir: PathBuf) -> Self {
+        Self {
+            default_timeout_ms,
+            state_dir,
+        }
     }
 }
 
@@ -98,10 +109,19 @@ impl Tool for BashTool {
         // Best-effort protected file check for bash commands
         let suspicious = crate::security::check_bash_command(command);
         if !suspicious.is_empty() {
-            tracing::warn!(
-                "Bash command may modify protected files: {:?}",
-                suspicious
+            let detail = format!(
+                "Bash command references protected files: {:?} (cmd: {})",
+                suspicious,
+                &command[..command.len().min(200)]
             );
+            let _ = crate::security::append_audit_entry_with_detail(
+                &self.state_dir,
+                crate::security::AuditAction::WriteBlocked,
+                "",
+                "tool:bash",
+                Some(&detail),
+            );
+            tracing::warn!("Bash command may modify protected files: {:?}", suspicious);
         }
 
         debug!(
@@ -223,11 +243,13 @@ impl Tool for ReadFileTool {
 }
 
 // Write File Tool
-pub struct WriteFileTool;
+pub struct WriteFileTool {
+    state_dir: PathBuf,
+}
 
 impl WriteFileTool {
-    pub fn new() -> Self {
-        Self
+    pub fn new(state_dir: PathBuf) -> Self {
+        Self { state_dir }
     }
 }
 
@@ -273,6 +295,14 @@ impl Tool for WriteFileTool {
         // Check protected files
         if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
             if crate::security::is_workspace_file_protected(name) {
+                let detail = format!("Agent attempted write to {}", path.display());
+                let _ = crate::security::append_audit_entry_with_detail(
+                    &self.state_dir,
+                    crate::security::AuditAction::WriteBlocked,
+                    "",
+                    "tool:write_file",
+                    Some(&detail),
+                );
                 anyhow::bail!(
                     "Cannot write to protected file: {}. This file is managed by the security system. \
                      Use `localgpt security sign` to update the security policy.",
@@ -299,11 +329,13 @@ impl Tool for WriteFileTool {
 }
 
 // Edit File Tool
-pub struct EditFileTool;
+pub struct EditFileTool {
+    state_dir: PathBuf,
+}
 
 impl EditFileTool {
-    pub fn new() -> Self {
-        Self
+    pub fn new(state_dir: PathBuf) -> Self {
+        Self { state_dir }
     }
 }
 
@@ -358,8 +390,19 @@ impl Tool for EditFileTool {
         let path = shellexpand::tilde(path).to_string();
 
         // Check protected files
-        if let Some(name) = std::path::Path::new(&path).file_name().and_then(|n| n.to_str()) {
+        if let Some(name) = std::path::Path::new(&path)
+            .file_name()
+            .and_then(|n| n.to_str())
+        {
             if crate::security::is_workspace_file_protected(name) {
+                let detail = format!("Agent attempted edit to {}", path);
+                let _ = crate::security::append_audit_entry_with_detail(
+                    &self.state_dir,
+                    crate::security::AuditAction::WriteBlocked,
+                    "",
+                    "tool:edit_file",
+                    Some(&detail),
+                );
                 anyhow::bail!(
                     "Cannot edit protected file: {}. This file is managed by the security system.",
                     path

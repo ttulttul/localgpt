@@ -28,6 +28,10 @@ pub enum SecurityCommands {
         /// Output as JSON
         #[arg(long)]
         json: bool,
+
+        /// Filter by action type (e.g., write_blocked, tamper_detected)
+        #[arg(long)]
+        filter: Option<String>,
     },
 
     /// Show current security posture
@@ -38,7 +42,7 @@ pub async fn run(args: SecurityArgs) -> Result<()> {
     match args.command {
         SecurityCommands::Sign => sign_policy().await,
         SecurityCommands::Verify => verify_policy().await,
-        SecurityCommands::Audit { json } => show_audit(json).await,
+        SecurityCommands::Audit { json, filter } => show_audit(json, filter).await,
         SecurityCommands::Status => show_status().await,
     }
 }
@@ -100,12 +104,7 @@ async fn verify_policy() -> Result<()> {
 
             // Write audit entry
             let sha = security::content_sha256(&content);
-            security::append_audit_entry(
-                state_dir,
-                security::AuditAction::Verified,
-                &sha,
-                "cli",
-            )?;
+            security::append_audit_entry(state_dir, security::AuditAction::Verified, &sha, "cli")?;
         }
         security::PolicyVerification::Unsigned => {
             println!("Policy: UNSIGNED");
@@ -113,7 +112,9 @@ async fn verify_policy() -> Result<()> {
         }
         security::PolicyVerification::TamperDetected => {
             println!("Policy: TAMPER DETECTED");
-            println!("  The file was modified after signing. Re-sign with `localgpt security sign`.");
+            println!(
+                "  The file was modified after signing. Re-sign with `localgpt security sign`."
+            );
 
             security::append_audit_entry(
                 state_dir,
@@ -144,34 +145,66 @@ async fn verify_policy() -> Result<()> {
     Ok(())
 }
 
-async fn show_audit(json_output: bool) -> Result<()> {
+async fn show_audit(json_output: bool, filter: Option<String>) -> Result<()> {
     let config = Config::load()?;
     let workspace = config.workspace_path();
     let state_dir = workspace
         .parent()
         .ok_or_else(|| anyhow::anyhow!("Workspace has no parent directory"))?;
 
-    let entries = security::read_audit_log(state_dir)?;
+    let mut entries = security::read_audit_log(state_dir)?;
+
+    // Apply filter if specified
+    if let Some(ref filter_action) = filter {
+        entries.retain(|e| {
+            let action_str = serde_json::to_string(&e.action).unwrap_or_default();
+            // action_str is like "\"write_blocked\"", strip quotes
+            let action_str = action_str.trim_matches('"');
+            action_str == filter_action
+        });
+    }
 
     if entries.is_empty() {
-        println!("No audit log entries.");
+        if filter.is_some() {
+            println!("No audit log entries matching filter.");
+        } else {
+            println!("No audit log entries.");
+        }
         return Ok(());
     }
 
-    // Verify chain integrity
+    // Verify chain integrity (on full log, not filtered)
     let broken = security::verify_audit_chain(state_dir)?;
 
     if json_output {
         let output = serde_json::to_string_pretty(&entries)?;
         println!("{}", output);
     } else {
-        println!("Security Audit Log ({} entries):", entries.len());
+        let label = if let Some(ref f) = filter {
+            format!(
+                "Security Audit Log ({} entries, filter: {}):",
+                entries.len(),
+                f
+            )
+        } else {
+            format!("Security Audit Log ({} entries):", entries.len())
+        };
+        println!("{}", label);
         println!();
 
         for (i, entry) in entries.iter().enumerate() {
-            let chain_status = if broken.contains(&i) { " [CHAIN BROKEN]" } else { "" };
+            let chain_status = if broken.contains(&i) {
+                " [CHAIN BROKEN]"
+            } else {
+                ""
+            };
+            let detail_str = entry
+                .detail
+                .as_deref()
+                .map(|d| format!(" — {}", d))
+                .unwrap_or_default();
             println!(
-                "  {} {:?} (source: {}, sha256: {}){}",
+                "  {} {:?} (source: {}, sha256: {}){}{}",
                 entry.ts,
                 entry.action,
                 entry.source,
@@ -180,7 +213,8 @@ async fn show_audit(json_output: bool) -> Result<()> {
                 } else {
                     &entry.content_sha256
                 },
-                chain_status
+                chain_status,
+                detail_str,
             );
         }
 
@@ -188,10 +222,7 @@ async fn show_audit(json_output: bool) -> Result<()> {
         if broken.is_empty() {
             println!("Chain integrity: INTACT");
         } else {
-            println!(
-                "Chain integrity: BROKEN at {} position(s)",
-                broken.len()
-            );
+            println!("Chain integrity: BROKEN at {} position(s)", broken.len());
         }
     }
 
@@ -251,11 +282,7 @@ async fn show_status() -> Result<()> {
         } else {
             "CHAIN BROKEN"
         };
-        println!(
-            "  Audit Log:  {} entries, {}",
-            entries.len(),
-            chain_status
-        );
+        println!("  Audit Log:  {} entries, {}", entries.len(), chain_status);
     }
 
     // Protected files

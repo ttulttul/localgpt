@@ -103,52 +103,33 @@
 // ── Policy Verification ─────────────────────────────────────────────
 
 pub use super::policy::{
-    load_and_verify_policy,
-    sanitize_policy_content,
-    PolicyVerification,
-    MAX_POLICY_CHARS,
+    load_and_verify_policy, sanitize_policy_content, PolicyVerification, MAX_POLICY_CHARS,
 };
 
 // ── Signing & Integrity ─────────────────────────────────────────────
 
 pub use super::signing::{
-    content_sha256,
-    ensure_device_key,
-    read_device_key,
-    read_manifest,
-    sign_policy,
-    verify_signature,
-    Manifest,
-    MANIFEST_FILENAME,
+    content_sha256, ensure_device_key, read_device_key, read_manifest, sign_policy,
+    verify_signature, Manifest, MANIFEST_FILENAME,
 };
 
 // ── Audit Log ───────────────────────────────────────────────────────
 
 pub use super::audit::{
-    append_audit_entry,
-    audit_file_path,
-    read_audit_log,
-    verify_audit_chain,
-    AuditAction,
-    AuditEntry,
+    append_audit_entry, append_audit_entry_with_detail, audit_file_path, read_audit_log,
+    verify_audit_chain, AuditAction, AuditEntry,
 };
 
 // ── Protected Files ─────────────────────────────────────────────────
 
 pub use super::protected_files::{
-    check_bash_command,
-    is_path_protected,
-    is_workspace_file_protected,
-    PROTECTED_EXTERNAL_PATHS,
+    check_bash_command, is_path_protected, is_workspace_file_protected, PROTECTED_EXTERNAL_PATHS,
     PROTECTED_FILES,
 };
 
 // ── Context Window Suffix ───────────────────────────────────────────
 
-pub use super::suffix::{
-    build_ending_security_block,
-    HARDCODED_SECURITY_SUFFIX,
-};
+pub use super::suffix::{build_ending_security_block, HARDCODED_SECURITY_SUFFIX};
 
 // ── Constants ───────────────────────────────────────────────────────
 

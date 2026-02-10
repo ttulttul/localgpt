@@ -11,10 +11,10 @@ pub use providers::{
     StreamEvent, StreamResult, ToolCall, ToolSchema, Usage,
 };
 pub use sanitize::{
-    detect_suspicious_patterns, sanitize_tool_output, truncate_with_notice,
-    wrap_external_content, wrap_memory_content, wrap_tool_output, MemorySource, SanitizeResult,
-    EXTERNAL_CONTENT_END, EXTERNAL_CONTENT_START, MEMORY_CONTENT_END, MEMORY_CONTENT_START,
-    TOOL_OUTPUT_END, TOOL_OUTPUT_START,
+    detect_suspicious_patterns, sanitize_tool_output, truncate_with_notice, wrap_external_content,
+    wrap_memory_content, wrap_tool_output, MemorySource, SanitizeResult, EXTERNAL_CONTENT_END,
+    EXTERNAL_CONTENT_START, MEMORY_CONTENT_END, MEMORY_CONTENT_START, TOOL_OUTPUT_END,
+    TOOL_OUTPUT_START,
 };
 pub use session::{
     get_last_session_id, get_last_session_id_for_agent, get_sessions_dir_for_agent, get_state_dir,
@@ -40,6 +40,11 @@ use crate::memory::{MemoryChunk, MemoryManager};
 /// Soft threshold buffer before compaction (tokens)
 /// Memory flush runs when within this buffer of the hard limit
 const MEMORY_FLUSH_SOFT_THRESHOLD: usize = 4000;
+
+/// Token budget reserved for the per-turn security block (~80 suffix + ~1000 policy + margin).
+/// Subtracted from available context to prevent the security block from being dropped
+/// during context window management.
+const SECURITY_BLOCK_RESERVE: usize = 1200;
 
 /// Generate a URL-safe slug from text (first 3-5 words, lowercased, hyphenated)
 fn generate_slug(text: &str) -> String {
@@ -97,72 +102,92 @@ impl Agent {
             .parent()
             .unwrap_or_else(|| std::path::Path::new("~/.localgpt"));
 
-        let verified_security_policy =
-            match crate::security::load_and_verify_policy(&workspace, state_dir) {
-                crate::security::PolicyVerification::Valid(content) => {
-                    info!("Security policy verified and loaded");
-                    Some(content)
-                }
-                crate::security::PolicyVerification::TamperDetected => {
-                    let _ = crate::security::append_audit_entry(
-                        state_dir,
-                        crate::security::AuditAction::TamperDetected,
-                        "",
-                        "session_start",
+        let verified_security_policy = match crate::security::load_and_verify_policy(
+            &workspace, state_dir,
+        ) {
+            crate::security::PolicyVerification::Valid(content) => {
+                let sha = crate::security::content_sha256(&content);
+                let _ = crate::security::append_audit_entry(
+                    state_dir,
+                    crate::security::AuditAction::Verified,
+                    &sha,
+                    "session_start",
+                );
+                info!("Security policy verified and loaded");
+                Some(content)
+            }
+            crate::security::PolicyVerification::TamperDetected => {
+                let _ = crate::security::append_audit_entry(
+                    state_dir,
+                    crate::security::AuditAction::TamperDetected,
+                    "",
+                    "session_start",
+                );
+                if app_config.security.strict_policy {
+                    tracing::error!(
+                        "LocalGPT.md tamper detected — file was modified after signing"
                     );
-                    if app_config.security.strict_policy {
-                        tracing::error!(
-                            "LocalGPT.md tamper detected — file was modified after signing"
-                        );
-                        anyhow::bail!(
+                    anyhow::bail!(
                             "Security policy tamper detected. \
                              Re-sign with `localgpt security sign` or remove LocalGPT.md to continue."
                         );
-                    }
-                    tracing::warn!(
-                        "LocalGPT.md tamper detected. Using hardcoded security only."
-                    );
-                    None
                 }
-                crate::security::PolicyVerification::Unsigned => {
-                    info!("LocalGPT.md not signed. Run `localgpt security sign` to activate.");
-                    None
-                }
-                crate::security::PolicyVerification::SuspiciousContent(warnings) => {
-                    let _ = crate::security::append_audit_entry(
-                        state_dir,
-                        crate::security::AuditAction::SuspiciousContent,
-                        "",
-                        "session_start",
-                    );
-                    if app_config.security.strict_policy {
-                        tracing::error!(
-                            "LocalGPT.md contains suspicious patterns: {:?}",
-                            warnings
-                        );
-                        anyhow::bail!(
-                            "Security policy rejected — suspicious content detected: {}. \
+                tracing::warn!("LocalGPT.md tamper detected. Using hardcoded security only.");
+                None
+            }
+            crate::security::PolicyVerification::Unsigned => {
+                let _ = crate::security::append_audit_entry(
+                    state_dir,
+                    crate::security::AuditAction::Unsigned,
+                    "",
+                    "session_start",
+                );
+                info!("LocalGPT.md not signed. Run `localgpt security sign` to activate.");
+                None
+            }
+            crate::security::PolicyVerification::SuspiciousContent(warnings) => {
+                let _ = crate::security::append_audit_entry_with_detail(
+                    state_dir,
+                    crate::security::AuditAction::SuspiciousContent,
+                    "",
+                    "session_start",
+                    Some(&warnings.join(", ")),
+                );
+                if app_config.security.strict_policy {
+                    tracing::error!("LocalGPT.md contains suspicious patterns: {:?}", warnings);
+                    anyhow::bail!(
+                        "Security policy rejected — suspicious content detected: {}. \
                              Fix LocalGPT.md and re-sign with `localgpt security sign`.",
-                            warnings.join(", ")
-                        );
-                    }
-                    tracing::warn!(
-                        "LocalGPT.md contains suspicious patterns: {:?}. Skipping.",
-                        warnings
+                        warnings.join(", ")
                     );
-                    None
                 }
-                crate::security::PolicyVerification::Missing => {
-                    debug!("No LocalGPT.md found, using hardcoded security only.");
-                    None
-                }
-                crate::security::PolicyVerification::ManifestCorrupted => {
-                    tracing::warn!(
-                        "⚠ Security manifest corrupted. Using hardcoded security only."
-                    );
-                    None
-                }
-            };
+                tracing::warn!(
+                    "LocalGPT.md contains suspicious patterns: {:?}. Skipping.",
+                    warnings
+                );
+                None
+            }
+            crate::security::PolicyVerification::Missing => {
+                let _ = crate::security::append_audit_entry(
+                    state_dir,
+                    crate::security::AuditAction::Missing,
+                    "",
+                    "session_start",
+                );
+                debug!("No LocalGPT.md found, using hardcoded security only.");
+                None
+            }
+            crate::security::PolicyVerification::ManifestCorrupted => {
+                let _ = crate::security::append_audit_entry(
+                    state_dir,
+                    crate::security::AuditAction::ManifestCorrupted,
+                    "",
+                    "session_start",
+                );
+                tracing::warn!("Security manifest corrupted. Using hardcoded security only.");
+                None
+            }
+        };
 
         Ok(Self {
             config,
@@ -264,6 +289,30 @@ impl Agent {
         }
     }
 
+    /// Build the message array for an LLM API call, with the security
+    /// block injected as a trailing user message on every call.
+    ///
+    /// This ensures the security suffix always occupies the recency position
+    /// (last content before generation), regardless of conversation length.
+    /// The security block is synthetic — it is not persisted in session
+    /// history and not included in compaction/summarization.
+    fn messages_for_api_call(&self) -> Vec<Message> {
+        let mut messages = self.session.messages_for_llm();
+
+        // Security block: always last before generation (RFC §7.3)
+        let security_block =
+            crate::security::build_ending_security_block(self.verified_security_policy.as_deref());
+        messages.push(Message {
+            role: Role::User,
+            content: security_block,
+            tool_calls: None,
+            tool_call_id: None,
+            images: Vec::new(),
+        });
+
+        messages
+    }
+
     pub async fn new_session(&mut self) -> Result<()> {
         self.session = Session::new();
 
@@ -284,7 +333,7 @@ impl Agent {
         let memory_context = self.build_memory_context().await?;
 
         // Combine system prompt with memory context
-        let mut full_context = if memory_context.is_empty() {
+        let full_context = if memory_context.is_empty() {
             system_prompt
         } else {
             format!(
@@ -292,13 +341,6 @@ impl Agent {
                 system_prompt, memory_context
             )
         };
-
-        // Append ending security block (always last in context)
-        let security_block = crate::security::build_ending_security_block(
-            self.verified_security_policy.as_deref(),
-        );
-        full_context.push_str("\n\n---\n\n");
-        full_context.push_str(&security_block);
 
         self.session.set_system_context(full_context);
 
@@ -341,8 +383,8 @@ impl Agent {
             self.compact_session().await?;
         }
 
-        // Build messages for LLM
-        let messages = self.session.messages_for_llm();
+        // Build messages for LLM (with per-turn security block)
+        let messages = self.messages_for_api_call();
 
         // Get available tools
         let tool_schemas: Vec<ToolSchema> = self.tools.iter().map(|t| t.schema()).collect();
@@ -411,8 +453,8 @@ impl Agent {
                     });
                 }
 
-                // Continue conversation with tool results
-                let messages = self.session.messages_for_llm();
+                // Continue conversation with tool results (with per-turn security block)
+                let messages = self.messages_for_api_call();
                 let tool_schemas: Vec<ToolSchema> = self.tools.iter().map(|t| t.schema()).collect();
                 let next_response = self
                     .provider
@@ -607,12 +649,14 @@ impl Agent {
     }
 
     fn should_compact(&self) -> bool {
-        self.session.token_count() > (self.config.context_window - self.config.reserve_tokens)
+        self.session.token_count()
+            > (self.config.context_window - self.config.reserve_tokens - SECURITY_BLOCK_RESERVE)
     }
 
     /// Check if we should run pre-compaction memory flush (soft threshold)
     fn should_memory_flush(&self) -> bool {
-        let hard_limit = self.config.context_window - self.config.reserve_tokens;
+        let hard_limit =
+            self.config.context_window - self.config.reserve_tokens - SECURITY_BLOCK_RESERVE;
         let soft_limit = hard_limit.saturating_sub(MEMORY_FLUSH_SOFT_THRESHOLD);
 
         self.session.token_count() > soft_limit && self.session.should_memory_flush()
@@ -662,7 +706,7 @@ impl Agent {
 
         // Get tool schemas so agent can write files
         let tool_schemas: Vec<ToolSchema> = self.tools.iter().map(|t| t.schema()).collect();
-        let messages = self.session.messages_for_llm();
+        let messages = self.messages_for_api_call();
 
         let response = self.provider.chat(&messages, Some(&tool_schemas)).await?;
 
@@ -837,8 +881,8 @@ impl Agent {
             self.compact_session().await?;
         }
 
-        // Build messages for LLM
-        let messages = self.session.messages_for_llm();
+        // Build messages for LLM (with per-turn security block)
+        let messages = self.messages_for_api_call();
 
         // Get tool schemas so the model knows the correct tool call format
         let tool_schemas: Vec<ToolSchema> = self.tools.iter().map(|t| t.schema()).collect();
@@ -902,8 +946,8 @@ impl Agent {
             });
         }
 
-        // Get follow-up response from LLM
-        let messages = self.session.messages_for_llm();
+        // Get follow-up response from LLM (with per-turn security block)
+        let messages = self.messages_for_api_call();
         let tool_schemas: Vec<ToolSchema> = self.tools.iter().map(|t| t.schema()).collect();
         let response = self
             .provider
@@ -930,9 +974,9 @@ impl Agent {
         &*self.provider
     }
 
-    /// Get messages for the LLM (for streaming)
+    /// Get messages for the LLM (for streaming), with security block.
     pub fn session_messages(&self) -> Vec<Message> {
-        self.session.messages_for_llm()
+        self.messages_for_api_call()
     }
 
     /// Get raw session messages with metadata (for API responses)
@@ -1007,8 +1051,8 @@ impl Agent {
                 // Get tool schemas
                 let tool_schemas: Vec<ToolSchema> = self.tools.iter().map(|t| t.schema()).collect();
 
-                // Build messages for LLM
-                let messages = self.session.messages_for_llm();
+                // Build messages for LLM (with per-turn security block)
+                let messages = self.messages_for_api_call();
 
                 // Try streaming first (without tools since most providers don't support tool streaming)
                 // Then check for tool calls in the response

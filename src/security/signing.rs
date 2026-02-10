@@ -150,8 +150,7 @@ pub fn sign_policy(state_dir: &Path, workspace: &Path, signed_by: &str) -> Resul
     };
 
     let manifest_path = workspace.join(MANIFEST_FILENAME);
-    let json = serde_json::to_string_pretty(&manifest)
-        .context("Failed to serialize manifest")?;
+    let json = serde_json::to_string_pretty(&manifest).context("Failed to serialize manifest")?;
     fs::write(&manifest_path, json).context("Failed to write manifest")?;
 
     Ok(manifest)

@@ -32,8 +32,7 @@ use std::path::{Path, PathBuf};
 const AUDIT_FILENAME: &str = ".security_audit.jsonl";
 
 /// The hash used for the first entry in the chain (no predecessor).
-const GENESIS_HASH: &str =
-    "0000000000000000000000000000000000000000000000000000000000000000";
+const GENESIS_HASH: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 
 /// Security audit log entry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -46,14 +45,19 @@ pub struct AuditEntry {
     pub content_sha256: String,
     /// SHA-256 of the previous JSONL line (chain link, hex-encoded).
     pub prev_entry_sha256: String,
-    /// Who triggered the action: `"cli"`, `"gui"`, or `"session_start"`.
+    /// Who triggered the action: `"cli"`, `"session_start"`, `"tool:{name}"`, etc.
     pub source: String,
+    /// Optional context. Tool name and path for `WriteBlocked`, patterns for `SuspiciousContent`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
 }
 
 /// Security actions recorded in the audit log.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum AuditAction {
+    /// Policy template was created during workspace init.
+    Created,
     /// Policy was signed via CLI or GUI.
     Signed,
     /// Policy was verified at session start.
@@ -62,16 +66,26 @@ pub enum AuditAction {
     TamperDetected,
     /// Policy file is missing from the workspace.
     Missing,
-    /// Policy template was created during workspace init.
-    Created,
+    /// Policy exists but has no manifest (not yet signed).
+    Unsigned,
+    /// Manifest JSON parse failure.
+    ManifestCorrupted,
     /// Policy contains suspicious prompt injection patterns.
     SuspiciousContent,
+    /// File watcher detected LocalGPT.md modification mid-session.
+    FileChanged,
+    /// Agent tool attempted to write a protected file.
+    WriteBlocked,
+    /// Previous audit entry corrupted, new chain segment started.
+    ChainRecovery,
 }
 
 /// Append a new entry to the audit log.
 ///
 /// Reads the last line of the existing log (if any) to compute the
-/// chain hash, then appends a new JSONL line.
+/// chain hash, then appends a new JSONL line. If the last line is
+/// corrupted (not valid JSON), a `ChainRecovery` entry is inserted
+/// first to record the break point.
 ///
 /// # Arguments
 ///
@@ -85,13 +99,47 @@ pub fn append_audit_entry(
     content_sha256: &str,
     source: &str,
 ) -> Result<()> {
+    append_audit_entry_with_detail(state_dir, action, content_sha256, source, None)
+}
+
+/// Append a new entry to the audit log with an optional detail message.
+pub fn append_audit_entry_with_detail(
+    state_dir: &Path,
+    action: AuditAction,
+    content_sha256: &str,
+    source: &str,
+    detail: Option<&str>,
+) -> Result<()> {
     let path = audit_file_path(state_dir);
 
-    // Read the last line to compute the chain hash
+    // Read the last line to compute the chain hash, with corruption recovery
     let prev_hash = if path.exists() {
         let content = fs::read_to_string(&path).context("Failed to read audit log")?;
         match content.lines().last() {
-            Some(last_line) if !last_line.is_empty() => sha256_hex(last_line.as_bytes()),
+            Some(last_line) if !last_line.is_empty() => {
+                // Attempt to parse as JSON to detect corruption
+                if serde_json::from_str::<AuditEntry>(last_line).is_ok() {
+                    sha256_hex(last_line.as_bytes())
+                } else {
+                    // Corrupted last line — write a ChainRecovery entry first
+                    let raw_hash = sha256_hex(last_line.as_bytes());
+                    let recovery = AuditEntry {
+                        ts: chrono::Utc::now().to_rfc3339(),
+                        action: AuditAction::ChainRecovery,
+                        content_sha256: String::new(),
+                        prev_entry_sha256: raw_hash,
+                        source: "audit_system".to_string(),
+                        detail: Some(format!(
+                            "Previous entry corrupted ({} bytes), new chain segment",
+                            last_line.len()
+                        )),
+                    };
+                    let recovery_json = serde_json::to_string(&recovery)
+                        .context("Failed to serialize recovery entry")?;
+                    append_line(&path, &recovery_json)?;
+                    sha256_hex(recovery_json.as_bytes())
+                }
+            }
             _ => GENESIS_HASH.to_string(),
         }
     } else {
@@ -104,25 +152,30 @@ pub fn append_audit_entry(
         content_sha256: content_sha256.to_string(),
         prev_entry_sha256: prev_hash,
         source: source.to_string(),
+        detail: detail.map(|d| d.to_string()),
     };
 
     let json = serde_json::to_string(&entry).context("Failed to serialize audit entry")?;
+    append_line(&path, &json)?;
 
-    // Append to file (create if needed)
+    Ok(())
+}
+
+/// Append a single line to a file.
+fn append_line(path: &Path, line: &str) -> Result<()> {
     let mut file = fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(&path)
+        .open(path)
         .context("Failed to open audit log")?;
-
-    writeln!(file, "{}", json).context("Failed to write audit entry")?;
-
+    writeln!(file, "{}", line).context("Failed to write audit entry")?;
     Ok(())
 }
 
 /// Read and parse all entries from the audit log.
 ///
-/// Returns an empty vector if the log file does not exist.
+/// Corrupted lines are skipped (not fatal). Returns an empty vector
+/// if the log file does not exist.
 pub fn read_audit_log(state_dir: &Path) -> Result<Vec<AuditEntry>> {
     let path = audit_file_path(state_dir);
 
@@ -133,13 +186,14 @@ pub fn read_audit_log(state_dir: &Path) -> Result<Vec<AuditEntry>> {
     let content = fs::read_to_string(&path).context("Failed to read audit log")?;
     let mut entries = Vec::new();
 
-    for (i, line) in content.lines().enumerate() {
+    for line in content.lines() {
         if line.is_empty() {
             continue;
         }
-        let entry: AuditEntry = serde_json::from_str(line)
-            .with_context(|| format!("Failed to parse audit log line {}", i + 1))?;
-        entries.push(entry);
+        // Skip corrupted lines rather than failing (RFC §5.6)
+        if let Ok(entry) = serde_json::from_str::<AuditEntry>(line) {
+            entries.push(entry);
+        }
     }
 
     Ok(entries)
@@ -149,6 +203,7 @@ pub fn read_audit_log(state_dir: &Path) -> Result<Vec<AuditEntry>> {
 ///
 /// Returns a list of indices where the chain is broken (i.e., the
 /// `prev_entry_sha256` does not match the SHA-256 of the previous line).
+/// Corrupted (non-JSON) lines are reported as broken and skipped.
 ///
 /// An empty return value means the chain is intact.
 pub fn verify_audit_chain(state_dir: &Path) -> Result<Vec<usize>> {
@@ -167,25 +222,29 @@ pub fn verify_audit_chain(state_dir: &Path) -> Result<Vec<usize>> {
 
     let mut broken = Vec::new();
 
-    // Parse all entries
-    let entries: Vec<AuditEntry> = lines
-        .iter()
-        .enumerate()
-        .map(|(i, line)| {
-            serde_json::from_str(line)
-                .with_context(|| format!("Failed to parse audit log line {}", i + 1))
-        })
-        .collect::<Result<Vec<_>>>()?;
+    // Parse entries, tracking which lines are valid
+    let mut parsed: Vec<Option<AuditEntry>> = Vec::new();
+    for line in &lines {
+        parsed.push(serde_json::from_str(line).ok());
+    }
 
     // Check first entry
-    if entries[0].prev_entry_sha256 != GENESIS_HASH {
-        broken.push(0);
+    if let Some(ref first) = parsed[0] {
+        if first.prev_entry_sha256 != GENESIS_HASH {
+            broken.push(0);
+        }
+    } else {
+        broken.push(0); // Corrupted first line
     }
 
     // Check chain links
-    for i in 1..entries.len() {
+    for i in 1..lines.len() {
+        if parsed[i].is_none() {
+            broken.push(i); // Corrupted line
+            continue;
+        }
         let expected_hash = sha256_hex(lines[i - 1].as_bytes());
-        if entries[i].prev_entry_sha256 != expected_hash {
+        if parsed[i].as_ref().unwrap().prev_entry_sha256 != expected_hash {
             broken.push(i);
         }
     }
@@ -297,9 +356,79 @@ mod tests {
             content_sha256: "abc".to_string(),
             prev_entry_sha256: GENESIS_HASH.to_string(),
             source: "cli".to_string(),
+            detail: None,
         };
 
         let json = serde_json::to_string(&entry).unwrap();
         assert!(json.contains("\"tamper_detected\""));
+        // detail should be omitted when None
+        assert!(!json.contains("\"detail\""));
+    }
+
+    #[test]
+    fn detail_field_serialized_when_present() {
+        let entry = AuditEntry {
+            ts: "2026-02-09T14:00:00Z".to_string(),
+            action: AuditAction::WriteBlocked,
+            content_sha256: String::new(),
+            prev_entry_sha256: GENESIS_HASH.to_string(),
+            source: "tool:write_file".to_string(),
+            detail: Some("Agent attempted write to LocalGPT.md".to_string()),
+        };
+
+        let json = serde_json::to_string(&entry).unwrap();
+        assert!(json.contains("\"write_blocked\""));
+        assert!(json.contains("Agent attempted write to LocalGPT.md"));
+
+        // Roundtrip
+        let parsed: AuditEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            parsed.detail.unwrap(),
+            "Agent attempted write to LocalGPT.md"
+        );
+    }
+
+    #[test]
+    fn chain_recovery_on_corrupted_line() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        // Write 2 valid entries
+        append_audit_entry(tmp.path(), AuditAction::Signed, "abc", "cli").unwrap();
+        append_audit_entry(tmp.path(), AuditAction::Verified, "abc", "session_start").unwrap();
+
+        // Corrupt the last line
+        let path = audit_file_path(tmp.path());
+        let mut content = fs::read_to_string(&path).unwrap();
+        content.push_str("this is not json\n");
+        fs::write(&path, &content).unwrap();
+
+        // Next append should trigger ChainRecovery
+        append_audit_entry(tmp.path(), AuditAction::Verified, "abc", "session_start").unwrap();
+
+        let entries = read_audit_log(tmp.path()).unwrap();
+        // Should have: Signed, Verified, ChainRecovery, Verified (corrupted line skipped)
+        assert_eq!(entries.len(), 4);
+        assert_eq!(entries[2].action, AuditAction::ChainRecovery);
+        assert!(entries[2].detail.as_ref().unwrap().contains("corrupted"));
+        assert_eq!(entries[2].source, "audit_system");
+    }
+
+    #[test]
+    fn corrupted_lines_skipped_in_read() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = audit_file_path(tmp.path());
+
+        // Write a valid entry, then garbage, then another valid entry
+        append_audit_entry(tmp.path(), AuditAction::Signed, "abc", "cli").unwrap();
+        // Insert garbage directly
+        let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        writeln!(file, "not valid json garbage").unwrap();
+        drop(file);
+        // The next append will trigger chain recovery
+        append_audit_entry(tmp.path(), AuditAction::Verified, "abc", "test").unwrap();
+
+        let entries = read_audit_log(tmp.path()).unwrap();
+        // Signed + ChainRecovery + Verified = 3 (garbage line skipped)
+        assert_eq!(entries.len(), 3);
     }
 }

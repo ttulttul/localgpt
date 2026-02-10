@@ -105,9 +105,7 @@ pub fn load_and_verify_policy(workspace: &Path, state_dir: &Path) -> PolicyVerif
     // Step 2: Check if manifest exists
     let manifest_path = workspace.join(signing::MANIFEST_FILENAME);
     if !manifest_path.exists() {
-        warn!(
-            "LocalGPT.md exists but is not signed. Run `localgpt security sign` to activate."
-        );
+        warn!("LocalGPT.md exists but is not signed. Run `localgpt security sign` to activate.");
         return PolicyVerification::Unsigned;
     }
 
@@ -195,10 +193,7 @@ pub fn sanitize_policy_content(content: &str) -> Result<String, Vec<String>> {
     let (truncated, was_truncated) =
         crate::agent::truncate_with_notice(&sanitized, MAX_POLICY_CHARS);
     if was_truncated {
-        tracing::info!(
-            "Security policy truncated to {} chars",
-            MAX_POLICY_CHARS
-        );
+        tracing::info!("Security policy truncated to {} chars", MAX_POLICY_CHARS);
     }
 
     Ok(truncated)
