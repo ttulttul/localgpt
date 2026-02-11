@@ -102,90 +102,93 @@ impl Agent {
             .parent()
             .unwrap_or_else(|| std::path::Path::new("~/.localgpt"));
 
-        let verified_security_policy = match crate::security::load_and_verify_policy(
-            &workspace, state_dir,
-        ) {
-            crate::security::PolicyVerification::Valid(content) => {
-                let sha = crate::security::content_sha256(&content);
-                let _ = crate::security::append_audit_entry(
-                    state_dir,
-                    crate::security::AuditAction::Verified,
-                    &sha,
-                    "session_start",
-                );
-                info!("Security policy verified and loaded");
-                Some(content)
-            }
-            crate::security::PolicyVerification::TamperDetected => {
-                let _ = crate::security::append_audit_entry(
-                    state_dir,
-                    crate::security::AuditAction::TamperDetected,
-                    "",
-                    "session_start",
-                );
-                if app_config.security.strict_policy {
-                    tracing::error!(
-                        "LocalGPT.md tamper detected — file was modified after signing"
+        let verified_security_policy = if app_config.security.disable_policy {
+            debug!("Security policy loading disabled by config");
+            None
+        } else {
+            match crate::security::load_and_verify_policy(&workspace, state_dir) {
+                crate::security::PolicyVerification::Valid(content) => {
+                    let sha = crate::security::content_sha256(&content);
+                    let _ = crate::security::append_audit_entry(
+                        state_dir,
+                        crate::security::AuditAction::Verified,
+                        &sha,
+                        "session_start",
                     );
-                    anyhow::bail!(
+                    info!("Security policy verified and loaded");
+                    Some(content)
+                }
+                crate::security::PolicyVerification::TamperDetected => {
+                    let _ = crate::security::append_audit_entry(
+                        state_dir,
+                        crate::security::AuditAction::TamperDetected,
+                        "",
+                        "session_start",
+                    );
+                    if app_config.security.strict_policy {
+                        tracing::error!(
+                            "LocalGPT.md tamper detected — file was modified after signing"
+                        );
+                        anyhow::bail!(
                             "Security policy tamper detected. \
                              Re-sign with `localgpt security sign` or remove LocalGPT.md to continue."
                         );
+                    }
+                    tracing::warn!("LocalGPT.md tamper detected. Using hardcoded security only.");
+                    None
                 }
-                tracing::warn!("LocalGPT.md tamper detected. Using hardcoded security only.");
-                None
-            }
-            crate::security::PolicyVerification::Unsigned => {
-                let _ = crate::security::append_audit_entry(
-                    state_dir,
-                    crate::security::AuditAction::Unsigned,
-                    "",
-                    "session_start",
-                );
-                info!("LocalGPT.md not signed. Run `localgpt security sign` to activate.");
-                None
-            }
-            crate::security::PolicyVerification::SuspiciousContent(warnings) => {
-                let _ = crate::security::append_audit_entry_with_detail(
-                    state_dir,
-                    crate::security::AuditAction::SuspiciousContent,
-                    "",
-                    "session_start",
-                    Some(&warnings.join(", ")),
-                );
-                if app_config.security.strict_policy {
-                    tracing::error!("LocalGPT.md contains suspicious patterns: {:?}", warnings);
-                    anyhow::bail!(
-                        "Security policy rejected — suspicious content detected: {}. \
-                             Fix LocalGPT.md and re-sign with `localgpt security sign`.",
-                        warnings.join(", ")
+                crate::security::PolicyVerification::Unsigned => {
+                    let _ = crate::security::append_audit_entry(
+                        state_dir,
+                        crate::security::AuditAction::Unsigned,
+                        "",
+                        "session_start",
                     );
+                    info!("LocalGPT.md not signed. Run `localgpt security sign` to activate.");
+                    None
                 }
-                tracing::warn!(
-                    "LocalGPT.md contains suspicious patterns: {:?}. Skipping.",
-                    warnings
-                );
-                None
-            }
-            crate::security::PolicyVerification::Missing => {
-                let _ = crate::security::append_audit_entry(
-                    state_dir,
-                    crate::security::AuditAction::Missing,
-                    "",
-                    "session_start",
-                );
-                debug!("No LocalGPT.md found, using hardcoded security only.");
-                None
-            }
-            crate::security::PolicyVerification::ManifestCorrupted => {
-                let _ = crate::security::append_audit_entry(
-                    state_dir,
-                    crate::security::AuditAction::ManifestCorrupted,
-                    "",
-                    "session_start",
-                );
-                tracing::warn!("Security manifest corrupted. Using hardcoded security only.");
-                None
+                crate::security::PolicyVerification::SuspiciousContent(warnings) => {
+                    let _ = crate::security::append_audit_entry_with_detail(
+                        state_dir,
+                        crate::security::AuditAction::SuspiciousContent,
+                        "",
+                        "session_start",
+                        Some(&warnings.join(", ")),
+                    );
+                    if app_config.security.strict_policy {
+                        tracing::error!("LocalGPT.md contains suspicious patterns: {:?}", warnings);
+                        anyhow::bail!(
+                            "Security policy rejected — suspicious content detected: {}. \
+                             Fix LocalGPT.md and re-sign with `localgpt security sign`.",
+                            warnings.join(", ")
+                        );
+                    }
+                    tracing::warn!(
+                        "LocalGPT.md contains suspicious patterns: {:?}. Skipping.",
+                        warnings
+                    );
+                    None
+                }
+                crate::security::PolicyVerification::Missing => {
+                    let _ = crate::security::append_audit_entry(
+                        state_dir,
+                        crate::security::AuditAction::Missing,
+                        "",
+                        "session_start",
+                    );
+                    debug!("No LocalGPT.md found, using hardcoded security only.");
+                    None
+                }
+                crate::security::PolicyVerification::ManifestCorrupted => {
+                    let _ = crate::security::append_audit_entry(
+                        state_dir,
+                        crate::security::AuditAction::ManifestCorrupted,
+                        "",
+                        "session_start",
+                    );
+                    tracing::warn!("Security manifest corrupted. Using hardcoded security only.");
+                    None
+                }
             }
         };
 
@@ -299,16 +302,25 @@ impl Agent {
     fn messages_for_api_call(&self) -> Vec<Message> {
         let mut messages = self.session.messages_for_llm();
 
-        // Security block: always last before generation (RFC §7.3)
-        let security_block =
-            crate::security::build_ending_security_block(self.verified_security_policy.as_deref());
-        messages.push(Message {
-            role: Role::User,
-            content: security_block,
-            tool_calls: None,
-            tool_call_id: None,
-            images: Vec::new(),
-        });
+        let include_suffix = !self.app_config.security.disable_suffix;
+        let policy = if self.app_config.security.disable_policy {
+            None
+        } else {
+            self.verified_security_policy.as_deref()
+        };
+
+        let security_block = crate::security::build_ending_security_block(policy, include_suffix);
+
+        // Only append if the block has content
+        if !security_block.is_empty() {
+            messages.push(Message {
+                role: Role::User,
+                content: security_block,
+                tool_calls: None,
+                tool_call_id: None,
+                images: Vec::new(),
+            });
+        }
 
         messages
     }

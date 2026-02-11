@@ -92,6 +92,14 @@ pub struct SecurityConfig {
     /// warns and falls back to hardcoded-only security.
     #[serde(default)]
     pub strict_policy: bool,
+
+    /// Skip loading and injecting the LocalGPT.md security policy (default: false)
+    #[serde(default)]
+    pub disable_policy: bool,
+
+    /// Skip injecting the hardcoded security suffix (default: false)
+    #[serde(default)]
+    pub disable_suffix: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

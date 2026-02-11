@@ -127,6 +127,16 @@ bind = "127.0.0.1"
 # enabled = true
 # api_token = "${TELEGRAM_BOT_TOKEN}"
 
+[security]
+# Abort on tamper or suspicious content in LocalGPT.md (default: false)
+# strict_policy = false
+
+# Skip loading the LocalGPT.md workspace security policy (default: false)
+# disable_policy = false
+
+# Skip the hardcoded security suffix injected at end of context (default: false)
+# disable_suffix = false
+
 [logging]
 # Log level: trace, debug, info, warn, error
 level = "info"
