@@ -88,6 +88,9 @@ rand = "0.8"
 sha2 = "0.10"
 hmac = "0.12"
 
+# Sandbox (process isolation)
+nix = { version = "0.29", features = ["process", "resource", "signal"] }
+
 # Telegram bot
 teloxide = { version = "0.17", features = ["macros"] }
 
@@ -104,6 +107,11 @@ eframe = { version = "0.30", optional = true, default-features = false, features
 [target.'cfg(unix)'.dependencies]
 daemonize = "0.5"
 rustyline = "17.0.2"
+
+# Linux sandbox (Landlock + seccomp)
+[target.'cfg(target_os = "linux")'.dependencies]
+landlock = "0.4"
+seccompiler = "0.4"
 
 [dev-dependencies]
 tempfile = "3.14"

@@ -36,6 +36,9 @@ pub struct Config {
     pub security: SecurityConfig,
 
     #[serde(default)]
+    pub sandbox: SandboxConfig,
+
+    #[serde(default)]
     pub telegram: Option<TelegramConfig>,
 }
 
@@ -100,6 +103,82 @@ pub struct SecurityConfig {
     /// Skip injecting the hardcoded security suffix (default: false)
     #[serde(default)]
     pub disable_suffix: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SandboxConfig {
+    /// Enable shell command sandboxing (default: true)
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    /// Sandbox level: "auto" | "full" | "standard" | "minimal" | "none"
+    #[serde(default = "default_sandbox_level")]
+    pub level: String,
+
+    /// Command timeout in seconds (default: 120)
+    #[serde(default = "default_sandbox_timeout")]
+    pub timeout_secs: u64,
+
+    /// Maximum output bytes (default: 1MB)
+    #[serde(default = "default_sandbox_max_output")]
+    pub max_output_bytes: u64,
+
+    /// Maximum file size in bytes (RLIMIT_FSIZE, default: 50MB)
+    #[serde(default = "default_sandbox_max_file_size")]
+    pub max_file_size_bytes: u64,
+
+    /// Maximum child processes (RLIMIT_NPROC, default: 64)
+    #[serde(default = "default_sandbox_max_processes")]
+    pub max_processes: u32,
+
+    /// Additional path allowances
+    #[serde(default)]
+    pub allow_paths: AllowPathsConfig,
+
+    /// Network policy
+    #[serde(default)]
+    pub network: SandboxNetworkConfig,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AllowPathsConfig {
+    /// Additional read-only paths
+    #[serde(default)]
+    pub read: Vec<String>,
+
+    /// Additional writable paths
+    #[serde(default)]
+    pub write: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SandboxNetworkConfig {
+    /// Network policy: "deny" | "proxy"
+    #[serde(default = "default_sandbox_network_policy")]
+    pub policy: String,
+}
+
+impl Default for SandboxConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_true(),
+            level: default_sandbox_level(),
+            timeout_secs: default_sandbox_timeout(),
+            max_output_bytes: default_sandbox_max_output(),
+            max_file_size_bytes: default_sandbox_max_file_size(),
+            max_processes: default_sandbox_max_processes(),
+            allow_paths: AllowPathsConfig::default(),
+            network: SandboxNetworkConfig::default(),
+        }
+    }
+}
+
+impl Default for SandboxNetworkConfig {
+    fn default() -> Self {
+        Self {
+            policy: default_sandbox_network_policy(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -354,6 +433,24 @@ fn default_log_level() -> String {
 }
 fn default_log_file() -> String {
     "~/.localgpt/logs/agent.log".to_string()
+}
+fn default_sandbox_level() -> String {
+    "auto".to_string()
+}
+fn default_sandbox_timeout() -> u64 {
+    120
+}
+fn default_sandbox_max_output() -> u64 {
+    1_048_576 // 1MB
+}
+fn default_sandbox_max_file_size() -> u64 {
+    52_428_800 // 50MB
+}
+fn default_sandbox_max_processes() -> u32 {
+    64
+}
+fn default_sandbox_network_policy() -> String {
+    "deny".to_string()
 }
 
 impl Default for AgentConfig {
@@ -634,6 +731,20 @@ bind = "127.0.0.1"
 
 [logging]
 level = "info"
+
+# Shell sandbox (kernel-enforced isolation for LLM-generated commands)
+# [sandbox]
+# enabled = true                        # default: true
+# level = "auto"                        # auto | full | standard | minimal | none
+# timeout_secs = 120                    # default: 120
+# max_output_bytes = 1048576            # default: 1MB
+#
+# [sandbox.allow_paths]
+# read = ["/data/datasets"]             # additional read-only paths
+# write = ["/tmp/builds"]               # additional writable paths
+#
+# [sandbox.network]
+# policy = "deny"                       # deny | proxy
 
 # Telegram bot (optional)
 # [telegram]

@@ -5,6 +5,7 @@ pub mod daemon;
 #[cfg(feature = "desktop")]
 pub mod desktop;
 pub mod memory;
+pub mod sandbox;
 pub mod security;
 
 use clap::{Parser, Subcommand};
@@ -59,4 +60,7 @@ pub enum Commands {
 
     /// Security policy management
     Security(security::SecurityArgs),
+
+    /// Shell sandbox management
+    Sandbox(sandbox::SandboxArgs),
 }
