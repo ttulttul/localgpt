@@ -1,4 +1,5 @@
 use super::policy::{NetworkPolicy, SandboxPolicy};
+use nix::libc;
 
 /// Apply Linux sandbox enforcement: rlimits → NO_NEW_PRIVS → Landlock → seccomp.
 ///
@@ -68,7 +69,7 @@ fn apply_landlock(policy: &SandboxPolicy) -> Result<(), String> {
     for path in &policy.read_only_paths {
         if path.exists() {
             if let Ok(fd) = PathFd::new(path) {
-                let _ = ruleset.add_rule(PathBeneath::new(fd, read_access));
+                let _ = (&mut ruleset).add_rule(PathBeneath::new(fd, read_access));
             }
         }
     }
@@ -76,7 +77,7 @@ fn apply_landlock(policy: &SandboxPolicy) -> Result<(), String> {
     // Workspace — read+write
     if policy.workspace_path.exists() {
         if let Ok(fd) = PathFd::new(&policy.workspace_path) {
-            let _ = ruleset.add_rule(PathBeneath::new(fd, write_access));
+            let _ = (&mut ruleset).add_rule(PathBeneath::new(fd, write_access));
         }
     }
 
@@ -84,7 +85,7 @@ fn apply_landlock(policy: &SandboxPolicy) -> Result<(), String> {
     for path in &policy.extra_write_paths {
         if path.exists() {
             if let Ok(fd) = PathFd::new(path) {
-                let _ = ruleset.add_rule(PathBeneath::new(fd, write_access));
+                let _ = (&mut ruleset).add_rule(PathBeneath::new(fd, write_access));
             }
         }
     }
@@ -112,24 +113,24 @@ fn apply_landlock(policy: &SandboxPolicy) -> Result<(), String> {
 
 /// Apply seccomp-bpf filter that denies network-related syscalls with EPERM.
 fn apply_seccomp_network_deny() -> Result<(), String> {
-    use seccompiler::{BpfProgram, SeccompAction, SeccompFilter, SeccompRule};
+    use seccompiler::{BpfProgram, SeccompAction, SeccompFilter, SeccompRule, TargetArch};
     use std::collections::BTreeMap;
 
     // Network-related syscalls to deny
     let denied_syscalls: Vec<i64> = vec![
-        libc::SYS_socket as i64,
-        libc::SYS_connect as i64,
-        libc::SYS_accept as i64,
-        libc::SYS_accept4 as i64,
-        libc::SYS_bind as i64,
-        libc::SYS_listen as i64,
-        libc::SYS_sendto as i64,
-        libc::SYS_sendmsg as i64,
-        libc::SYS_sendmmsg as i64,
-        libc::SYS_recvfrom as i64,
-        libc::SYS_recvmsg as i64,
-        libc::SYS_recvmmsg as i64,
-        libc::SYS_ptrace as i64,
+        libc::SYS_socket,
+        libc::SYS_connect,
+        libc::SYS_accept,
+        libc::SYS_accept4,
+        libc::SYS_bind,
+        libc::SYS_listen,
+        libc::SYS_sendto,
+        libc::SYS_sendmsg,
+        libc::SYS_sendmmsg,
+        libc::SYS_recvfrom,
+        libc::SYS_recvmsg,
+        libc::SYS_recvmmsg,
+        libc::SYS_ptrace,
     ];
 
     let mut rules: BTreeMap<i64, Vec<SeccompRule>> = BTreeMap::new();
@@ -137,17 +138,21 @@ fn apply_seccomp_network_deny() -> Result<(), String> {
         rules.insert(syscall, vec![SeccompRule::new(vec![]).unwrap()]);
     }
 
+    let target_arch: TargetArch = std::env::consts::ARCH
+        .try_into()
+        .map_err(|e: seccompiler::BackendError| format!("seccomp unsupported arch: {}", e))?;
+
     let filter = SeccompFilter::new(
         rules,
         SeccompAction::Allow, // Default: allow all other syscalls
         SeccompAction::Errno(libc::EPERM as u32), // Denied syscalls get EPERM
-        std::env::consts::ARCH.into(),
+        target_arch,
     )
     .map_err(|e| format!("seccomp filter creation: {}", e))?;
 
     let bpf: BpfProgram = filter
         .try_into()
-        .map_err(|e: seccompiler::Error| format!("seccomp BPF compilation: {}", e))?;
+        .map_err(|e: seccompiler::BackendError| format!("seccomp BPF compilation: {}", e))?;
 
     seccompiler::apply_filter(&bpf).map_err(|e| format!("seccomp apply_filter: {}", e))?;
 

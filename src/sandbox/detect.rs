@@ -41,8 +41,6 @@ pub fn detect_capabilities() -> SandboxCapabilities {
 
 #[cfg(target_os = "linux")]
 fn detect_linux() -> SandboxCapabilities {
-    use landlock::{Access, AccessFs, Ruleset, RulesetAttr, ABI};
-
     // Probe Landlock ABI version by trying to create a ruleset
     let landlock_abi = probe_landlock_abi();
 

@@ -112,9 +112,7 @@ async fn verify_policy() -> Result<()> {
         }
         security::PolicyVerification::TamperDetected => {
             println!("Policy: TAMPER DETECTED");
-            println!(
-                "  The file was modified after signing. Re-sign with `localgpt md sign`."
-            );
+            println!("  The file was modified after signing. Re-sign with `localgpt md sign`.");
 
             security::append_audit_entry(
                 state_dir,
