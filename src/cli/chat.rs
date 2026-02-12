@@ -1,14 +1,14 @@
 use anyhow::Result;
 use clap::Args;
 use futures::StreamExt;
-use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
+use rustyline::error::ReadlineError;
 use std::io::{self, Write};
 
 use localgpt::agent::{
-    extract_tool_detail, get_last_session_id_for_agent, get_skills_summary,
-    list_sessions_for_agent, load_skills, parse_skill_command, search_sessions_for_agent, Agent,
-    AgentConfig, ImageAttachment, Skill,
+    Agent, AgentConfig, ImageAttachment, Skill, extract_tool_detail, get_last_session_id_for_agent,
+    get_skills_summary, list_sessions_for_agent, load_skills, parse_skill_command,
+    search_sessions_for_agent,
 };
 use localgpt::concurrency::WorkspaceLock;
 use localgpt::config::Config;
@@ -61,17 +61,17 @@ fn extract_snippet(content: &str, query: &str, max_len: usize) -> String {
         let mut snippet_end = end;
 
         // Find word boundary at start
-        if start > 0 {
-            if let Some(space_pos) = normalized[start..].find(' ') {
-                snippet_start = start + space_pos + 1;
-            }
+        if start > 0
+            && let Some(space_pos) = normalized[start..].find(' ')
+        {
+            snippet_start = start + space_pos + 1;
         }
 
         // Find word boundary at end
-        if end < normalized.len() {
-            if let Some(space_pos) = normalized[..end].rfind(' ') {
-                snippet_end = space_pos;
-            }
+        if end < normalized.len()
+            && let Some(space_pos) = normalized[..end].rfind(' ')
+        {
+            snippet_end = space_pos;
         }
 
         let snippet = &normalized[snippet_start..snippet_end];
@@ -255,7 +255,7 @@ pub async fn run(args: ChatArgs, agent_id: &str) -> Result<()> {
                     // Read as binary and encode as base64
                     match std::fs::read(&expanded) {
                         Ok(bytes) => {
-                            use base64::{engine::general_purpose::STANDARD, Engine as _};
+                            use base64::{Engine as _, engine::general_purpose::STANDARD};
                             let data = STANDARD.encode(&bytes);
                             let media_type = match ext.as_deref() {
                                 Some("png") => "image/png",
@@ -272,7 +272,9 @@ pub async fn run(args: ChatArgs, agent_id: &str) -> Result<()> {
                                 data: ImageAttachment { data, media_type },
                             });
                             println!("Attached image: {} ({} bytes)", filename, size);
-                            println!("Type your message to send with attachment(s), or /attachments to list.\n");
+                            println!(
+                                "Type your message to send with attachment(s), or /attachments to list.\n"
+                            );
                         }
                         Err(e) => {
                             eprintln!("Failed to read image file: {}", e);
@@ -288,7 +290,9 @@ pub async fn run(args: ChatArgs, agent_id: &str) -> Result<()> {
                                 content,
                             });
                             println!("Attached: {} ({} bytes)", filename, size);
-                            println!("Type your message to send with attachment(s), or /attachments to list.\n");
+                            println!(
+                                "Type your message to send with attachment(s), or /attachments to list.\n"
+                            );
                         }
                         Err(e) => {
                             eprintln!("Failed to read file: {}", e);

@@ -60,13 +60,13 @@ pub fn is_path_protected(path: &str, workspace: &Path, state_dir: &Path) -> bool
     let expanded_path = Path::new(expanded.as_ref());
 
     // Check workspace-internal protected files
-    if let Ok(canonical_workspace) = workspace.canonicalize() {
-        if let Ok(canonical_path) = expanded_path.canonicalize() {
-            for &protected in PROTECTED_FILES {
-                let protected_full = canonical_workspace.join(protected);
-                if canonical_path == protected_full {
-                    return true;
-                }
+    if let Ok(canonical_workspace) = workspace.canonicalize()
+        && let Ok(canonical_path) = expanded_path.canonicalize()
+    {
+        for &protected in PROTECTED_FILES {
+            let protected_full = canonical_workspace.join(protected);
+            if canonical_path == protected_full {
+                return true;
             }
         }
     }
@@ -77,13 +77,13 @@ pub fn is_path_protected(path: &str, workspace: &Path, state_dir: &Path) -> bool
     }
 
     // Check external protected paths (state directory)
-    if let Ok(canonical_state) = state_dir.canonicalize() {
-        if let Ok(canonical_path) = expanded_path.canonicalize() {
-            for &protected in PROTECTED_EXTERNAL_PATHS {
-                let protected_full = canonical_state.join(protected);
-                if canonical_path == protected_full {
-                    return true;
-                }
+    if let Ok(canonical_state) = state_dir.canonicalize()
+        && let Ok(canonical_path) = expanded_path.canonicalize()
+    {
+        for &protected in PROTECTED_EXTERNAL_PATHS {
+            let protected_full = canonical_state.join(protected);
+            if canonical_path == protected_full {
+                return true;
             }
         }
     }

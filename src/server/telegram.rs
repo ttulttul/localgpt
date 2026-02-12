@@ -14,7 +14,7 @@ use teloxide::types::{MessageId, ParseMode};
 use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
 
-use crate::agent::{extract_tool_detail, Agent, AgentConfig, StreamEvent};
+use crate::agent::{Agent, AgentConfig, StreamEvent, extract_tool_detail};
 use crate::concurrency::TurnGate;
 use crate::config::Config;
 use crate::memory::MemoryManager;
@@ -71,9 +71,9 @@ fn save_paired_user(user: &PairedUser) -> Result<()> {
 }
 
 fn generate_pairing_code() -> String {
-    use rand::Rng;
-    let mut rng = rand::thread_rng();
-    format!("{:06}", rng.gen_range(100000..999999u32))
+    use rand::RngExt;
+    let mut rng = rand::rng();
+    format!("{:06}", rng.random_range(100000..999999u32))
 }
 
 pub async fn run_telegram_bot(config: &Config, turn_gate: TurnGate) -> Result<()> {
@@ -541,55 +541,57 @@ fn convert_inline_markdown(line: &str) -> String {
 
     while i < len {
         // Inline code: `...`
-        if chars[i] == '`' {
-            if let Some(end) = chars[i + 1..].iter().position(|&c| c == '`') {
-                let code: String = chars[i + 1..i + 1 + end].iter().collect();
-                result.push_str(&format!("<code>{}</code>", escape_html(&code)));
-                i += end + 2;
-                continue;
-            }
+        if chars[i] == '`'
+            && let Some(end) = chars[i + 1..].iter().position(|&c| c == '`')
+        {
+            let code: String = chars[i + 1..i + 1 + end].iter().collect();
+            result.push_str(&format!("<code>{}</code>", escape_html(&code)));
+            i += end + 2;
+            continue;
         }
 
         // Bold: **...**
-        if i + 1 < len && chars[i] == '*' && chars[i + 1] == '*' {
-            if let Some(end) = find_closing(&chars, i + 2, &['*', '*']) {
-                let inner: String = chars[i + 2..end].iter().collect();
-                result.push_str(&format!("<b>{}</b>", escape_html(&inner)));
-                i = end + 2;
-                continue;
-            }
+        if i + 1 < len
+            && chars[i] == '*'
+            && chars[i + 1] == '*'
+            && let Some(end) = find_closing(&chars, i + 2, &['*', '*'])
+        {
+            let inner: String = chars[i + 2..end].iter().collect();
+            result.push_str(&format!("<b>{}</b>", escape_html(&inner)));
+            i = end + 2;
+            continue;
         }
 
         // Italic: *...*
-        if chars[i] == '*' {
-            if let Some(end) = chars[i + 1..].iter().position(|&c| c == '*') {
-                let inner: String = chars[i + 1..i + 1 + end].iter().collect();
-                result.push_str(&format!("<i>{}</i>", escape_html(&inner)));
-                i += end + 2;
-                continue;
-            }
+        if chars[i] == '*'
+            && let Some(end) = chars[i + 1..].iter().position(|&c| c == '*')
+        {
+            let inner: String = chars[i + 1..i + 1 + end].iter().collect();
+            result.push_str(&format!("<i>{}</i>", escape_html(&inner)));
+            i += end + 2;
+            continue;
         }
 
         // Link: [text](url)
-        if chars[i] == '[' {
-            if let Some(close_bracket) = chars[i + 1..].iter().position(|&c| c == ']') {
-                let text_end = i + 1 + close_bracket;
-                if text_end + 1 < len && chars[text_end + 1] == '(' {
-                    if let Some(close_paren) = chars[text_end + 2..].iter().position(|&c| c == ')')
-                    {
-                        let text: String = chars[i + 1..text_end].iter().collect();
-                        let url: String = chars[text_end + 2..text_end + 2 + close_paren]
-                            .iter()
-                            .collect();
-                        result.push_str(&format!(
-                            "<a href=\"{}\">{}</a>",
-                            escape_html(&url),
-                            escape_html(&text)
-                        ));
-                        i = text_end + 2 + close_paren + 1;
-                        continue;
-                    }
-                }
+        if chars[i] == '['
+            && let Some(close_bracket) = chars[i + 1..].iter().position(|&c| c == ']')
+        {
+            let text_end = i + 1 + close_bracket;
+            if text_end + 1 < len
+                && chars[text_end + 1] == '('
+                && let Some(close_paren) = chars[text_end + 2..].iter().position(|&c| c == ')')
+            {
+                let text: String = chars[i + 1..text_end].iter().collect();
+                let url: String = chars[text_end + 2..text_end + 2 + close_paren]
+                    .iter()
+                    .collect();
+                result.push_str(&format!(
+                    "<a href=\"{}\">{}</a>",
+                    escape_html(&url),
+                    escape_html(&text)
+                ));
+                i = text_end + 2 + close_paren + 1;
+                continue;
             }
         }
 

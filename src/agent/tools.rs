@@ -1,6 +1,6 @@
 use anyhow::Result;
 use async_trait::async_trait;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -263,14 +263,14 @@ impl Tool for ReadFileTool {
         let path = shellexpand::tilde(path).to_string();
 
         // Check credential directory access
-        if let Some(ref policy) = self.sandbox_policy {
-            if sandbox::policy::is_path_denied(std::path::Path::new(&path), policy) {
-                anyhow::bail!(
-                    "Cannot read file in denied directory: {}. \
+        if let Some(ref policy) = self.sandbox_policy
+            && sandbox::policy::is_path_denied(std::path::Path::new(&path), policy)
+        {
+            anyhow::bail!(
+                "Cannot read file in denied directory: {}. \
                      This path is blocked by sandbox policy.",
-                    path
-                );
-            }
+                path
+            );
         }
 
         debug!("Reading file: {}", path);
@@ -354,33 +354,33 @@ impl Tool for WriteFileTool {
         let path = PathBuf::from(&path);
 
         // Check credential directory access
-        if let Some(ref policy) = self.sandbox_policy {
-            if sandbox::policy::is_path_denied(&path, policy) {
-                anyhow::bail!(
-                    "Cannot write to denied directory: {}. \
+        if let Some(ref policy) = self.sandbox_policy
+            && sandbox::policy::is_path_denied(&path, policy)
+        {
+            anyhow::bail!(
+                "Cannot write to denied directory: {}. \
                      This path is blocked by sandbox policy.",
-                    path.display()
-                );
-            }
+                path.display()
+            );
         }
 
         // Check protected files
-        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-            if crate::security::is_workspace_file_protected(name) {
-                let detail = format!("Agent attempted write to {}", path.display());
-                let _ = crate::security::append_audit_entry_with_detail(
-                    &self.state_dir,
-                    crate::security::AuditAction::WriteBlocked,
-                    "",
-                    "tool:write_file",
-                    Some(&detail),
-                );
-                anyhow::bail!(
-                    "Cannot write to protected file: {}. This file is managed by the security system. \
+        if let Some(name) = path.file_name().and_then(|n| n.to_str())
+            && crate::security::is_workspace_file_protected(name)
+        {
+            let detail = format!("Agent attempted write to {}", path.display());
+            let _ = crate::security::append_audit_entry_with_detail(
+                &self.state_dir,
+                crate::security::AuditAction::WriteBlocked,
+                "",
+                "tool:write_file",
+                Some(&detail),
+            );
+            anyhow::bail!(
+                "Cannot write to protected file: {}. This file is managed by the security system. \
                      Use `localgpt md sign` to update the security policy.",
-                    path.display()
-                );
-            }
+                path.display()
+            );
         }
 
         debug!("Writing file: {}", path.display());
@@ -466,35 +466,34 @@ impl Tool for EditFileTool {
         let path = shellexpand::tilde(path).to_string();
 
         // Check credential directory access
-        if let Some(ref policy) = self.sandbox_policy {
-            if sandbox::policy::is_path_denied(std::path::Path::new(&path), policy) {
-                anyhow::bail!(
-                    "Cannot edit file in denied directory: {}. \
+        if let Some(ref policy) = self.sandbox_policy
+            && sandbox::policy::is_path_denied(std::path::Path::new(&path), policy)
+        {
+            anyhow::bail!(
+                "Cannot edit file in denied directory: {}. \
                      This path is blocked by sandbox policy.",
-                    path
-                );
-            }
+                path
+            );
         }
 
         // Check protected files
         if let Some(name) = std::path::Path::new(&path)
             .file_name()
             .and_then(|n| n.to_str())
+            && crate::security::is_workspace_file_protected(name)
         {
-            if crate::security::is_workspace_file_protected(name) {
-                let detail = format!("Agent attempted edit to {}", path);
-                let _ = crate::security::append_audit_entry_with_detail(
-                    &self.state_dir,
-                    crate::security::AuditAction::WriteBlocked,
-                    "",
-                    "tool:edit_file",
-                    Some(&detail),
-                );
-                anyhow::bail!(
-                    "Cannot edit protected file: {}. This file is managed by the security system.",
-                    path
-                );
-            }
+            let detail = format!("Agent attempted edit to {}", path);
+            let _ = crate::security::append_audit_entry_with_detail(
+                &self.state_dir,
+                crate::security::AuditAction::WriteBlocked,
+                "",
+                "tool:edit_file",
+                Some(&detail),
+            );
+            anyhow::bail!(
+                "Cannot edit protected file: {}. This file is managed by the security system.",
+                path
+            );
         }
 
         debug!("Editing file: {}", path);
@@ -568,14 +567,14 @@ impl Tool for MemorySearchTool {
         let mut results = Vec::new();
 
         let memory_file = self.workspace.join("MEMORY.md");
-        if memory_file.exists() {
-            if let Ok(content) = fs::read_to_string(&memory_file) {
-                for (i, line) in content.lines().enumerate() {
-                    if line.to_lowercase().contains(&query.to_lowercase()) {
-                        results.push(format!("MEMORY.md:{}: {}", i + 1, line));
-                        if results.len() >= limit {
-                            break;
-                        }
+        if memory_file.exists()
+            && let Ok(content) = fs::read_to_string(&memory_file)
+        {
+            for (i, line) in content.lines().enumerate() {
+                if line.to_lowercase().contains(&query.to_lowercase()) {
+                    results.push(format!("MEMORY.md:{}: {}", i + 1, line));
+                    if results.len() >= limit {
+                        break;
                     }
                 }
             }
@@ -583,29 +582,24 @@ impl Tool for MemorySearchTool {
 
         // Search daily logs
         let memory_dir = self.workspace.join("memory");
-        if memory_dir.exists() {
-            if let Ok(entries) = fs::read_dir(&memory_dir) {
-                for entry in entries.filter_map(|e| e.ok()) {
-                    if results.len() >= limit {
-                        break;
-                    }
+        if memory_dir.exists()
+            && let Ok(entries) = fs::read_dir(&memory_dir)
+        {
+            for entry in entries.filter_map(|e| e.ok()) {
+                if results.len() >= limit {
+                    break;
+                }
 
-                    let path = entry.path();
-                    if path.extension().map(|e| e == "md").unwrap_or(false) {
-                        if let Ok(content) = fs::read_to_string(&path) {
-                            let filename = path.file_name().unwrap().to_string_lossy();
-                            for (i, line) in content.lines().enumerate() {
-                                if line.to_lowercase().contains(&query.to_lowercase()) {
-                                    results.push(format!(
-                                        "memory/{}:{}: {}",
-                                        filename,
-                                        i + 1,
-                                        line
-                                    ));
-                                    if results.len() >= limit {
-                                        break;
-                                    }
-                                }
+                let path = entry.path();
+                if path.extension().map(|e| e == "md").unwrap_or(false)
+                    && let Ok(content) = fs::read_to_string(&path)
+                {
+                    let filename = path.file_name().unwrap().to_string_lossy();
+                    for (i, line) in content.lines().enumerate() {
+                        if line.to_lowercase().contains(&query.to_lowercase()) {
+                            results.push(format!("memory/{}:{}: {}", filename, i + 1, line));
+                            if results.len() >= limit {
+                                break;
                             }
                         }
                     }

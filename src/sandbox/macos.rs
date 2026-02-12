@@ -10,7 +10,8 @@ pub fn apply_sandbox(policy: &SandboxPolicy) -> Result<(), String> {
 
     // Store profile in env for the child's exec_bash to pick up.
     // On macOS, the child execs sandbox-exec instead of bash directly.
-    std::env::set_var("_LOCALGPT_SBPL_PROFILE", &profile);
+    // SAFETY: called before spawning the sandboxed child process
+    unsafe { std::env::set_var("_LOCALGPT_SBPL_PROFILE", &profile) };
 
     Ok(())
 }

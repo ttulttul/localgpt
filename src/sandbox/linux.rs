@@ -43,8 +43,8 @@ fn set_no_new_privs() -> Result<(), String> {
 /// on older kernels.
 fn apply_landlock(policy: &SandboxPolicy) -> Result<(), String> {
     use landlock::{
-        Access, AccessFs, PathBeneath, PathFd, Ruleset, RulesetAttr, RulesetCreatedAttr,
-        RulesetStatus, ABI,
+        ABI, Access, AccessFs, PathBeneath, PathFd, Ruleset, RulesetAttr, RulesetCreatedAttr,
+        RulesetStatus,
     };
 
     // Try best available ABI

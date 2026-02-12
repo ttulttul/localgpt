@@ -34,11 +34,11 @@ pub fn sandbox_child_main() -> ! {
     }
 
     // Apply platform-specific sandbox enforcement
-    if policy.level > SandboxLevel::None {
-        if let Err(e) = apply_platform_sandbox(&policy) {
-            eprintln!("localgpt-sandbox: failed to apply sandbox: {}", e);
-            std::process::exit(1);
-        }
+    if policy.level > SandboxLevel::None
+        && let Err(e) = apply_platform_sandbox(&policy)
+    {
+        eprintln!("localgpt-sandbox: failed to apply sandbox: {}", e);
+        std::process::exit(1);
     }
 
     // exec bash -c <command>
@@ -47,7 +47,7 @@ pub fn sandbox_child_main() -> ! {
 
 /// Apply resource limits using setrlimit.
 fn apply_rlimits(policy: &SandboxPolicy) -> Result<(), String> {
-    use nix::sys::resource::{setrlimit, Resource};
+    use nix::sys::resource::{Resource, setrlimit};
 
     // RLIMIT_FSIZE — max file size
     setrlimit(

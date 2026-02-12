@@ -20,6 +20,6 @@ pub mod policy;
 
 #[cfg(unix)]
 pub use child::sandbox_child_main;
-pub use detect::{detect_capabilities, SandboxCapabilities};
+pub use detect::{SandboxCapabilities, detect_capabilities};
 pub use executor::run_sandboxed;
-pub use policy::{build_policy, NetworkPolicy, SandboxLevel, SandboxMode, SandboxPolicy};
+pub use policy::{NetworkPolicy, SandboxLevel, SandboxMode, SandboxPolicy, build_policy};

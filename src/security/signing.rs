@@ -24,7 +24,7 @@
 
 use anyhow::{Context, Result};
 use hmac::{Hmac, Mac};
-use rand::Rng;
+use rand::RngExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -69,7 +69,7 @@ pub fn ensure_device_key(state_dir: &Path) -> Result<()> {
 
     // Generate 32 bytes from the OS CSPRNG
     let mut key = [0u8; DEVICE_KEY_LEN];
-    rand::thread_rng().fill(&mut key);
+    rand::rng().fill(&mut key);
 
     fs::write(&key_path, key).context("Failed to write device key")?;
 

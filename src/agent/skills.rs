@@ -187,11 +187,11 @@ pub fn load_skills(workspace: &Path) -> Result<Vec<Skill>> {
     let mut skills_map: HashMap<String, Skill> = HashMap::new();
 
     // Load from managed directory first (lower priority)
-    if let Some(managed_dir) = get_managed_skills_dir() {
-        if managed_dir.exists() {
-            for skill in load_skills_from_dir(&managed_dir, SkillSource::Managed)? {
-                skills_map.insert(skill.name.clone(), skill);
-            }
+    if let Some(managed_dir) = get_managed_skills_dir()
+        && managed_dir.exists()
+    {
+        for skill in load_skills_from_dir(&managed_dir, SkillSource::Managed)? {
+            skills_map.insert(skill.name.clone(), skill);
         }
     }
 

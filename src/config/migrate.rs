@@ -111,42 +111,42 @@ fn convert_openclaw_config(oc: OpenClawConfig) -> Config {
     let mut config = Config::default();
 
     // Migrate agent defaults
-    if let Some(agents) = oc.agents {
-        if let Some(defaults) = agents.defaults {
-            if let Some(workspace) = defaults.workspace {
-                // Convert OpenClaw workspace path to LocalGPT format
-                let workspace = workspace.replace("~/.openclaw/", "~/.localgpt/");
-                config.memory.workspace = workspace;
-            }
+    if let Some(agents) = oc.agents
+        && let Some(defaults) = agents.defaults
+    {
+        if let Some(workspace) = defaults.workspace {
+            // Convert OpenClaw workspace path to LocalGPT format
+            let workspace = workspace.replace("~/.openclaw/", "~/.localgpt/");
+            config.memory.workspace = workspace;
+        }
 
-            if let Some(model) = defaults.model {
-                config.agent.default_model = model;
-            }
+        if let Some(model) = defaults.model {
+            config.agent.default_model = model;
+        }
 
-            if let Some(context_window) = defaults.context_window {
-                config.agent.context_window = context_window;
-            }
+        if let Some(context_window) = defaults.context_window {
+            config.agent.context_window = context_window;
         }
     }
 
     // Migrate model configs (API keys)
     if let Some(models) = oc.models {
-        if let Some(openai) = models.openai {
-            if let Some(api_key) = openai.api_key {
-                config.providers.openai = Some(OpenAIConfig {
-                    api_key,
-                    base_url: "https://api.openai.com/v1".to_string(),
-                });
-            }
+        if let Some(openai) = models.openai
+            && let Some(api_key) = openai.api_key
+        {
+            config.providers.openai = Some(OpenAIConfig {
+                api_key,
+                base_url: "https://api.openai.com/v1".to_string(),
+            });
         }
 
-        if let Some(anthropic) = models.anthropic {
-            if let Some(api_key) = anthropic.api_key {
-                config.providers.anthropic = Some(AnthropicConfig {
-                    api_key,
-                    base_url: "https://api.anthropic.com".to_string(),
-                });
-            }
+        if let Some(anthropic) = models.anthropic
+            && let Some(api_key) = anthropic.api_key
+        {
+            config.providers.anthropic = Some(AnthropicConfig {
+                api_key,
+                base_url: "https://api.anthropic.com".to_string(),
+            });
         }
     }
 

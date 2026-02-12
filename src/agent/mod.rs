@@ -11,23 +11,23 @@ pub use providers::{
     StreamEvent, StreamResult, ToolCall, ToolSchema, Usage,
 };
 pub use sanitize::{
-    detect_suspicious_patterns, sanitize_tool_output, truncate_with_notice, wrap_external_content,
-    wrap_memory_content, wrap_tool_output, MemorySource, SanitizeResult, EXTERNAL_CONTENT_END,
-    EXTERNAL_CONTENT_START, MEMORY_CONTENT_END, MEMORY_CONTENT_START, TOOL_OUTPUT_END,
-    TOOL_OUTPUT_START,
+    EXTERNAL_CONTENT_END, EXTERNAL_CONTENT_START, MEMORY_CONTENT_END, MEMORY_CONTENT_START,
+    MemorySource, SanitizeResult, TOOL_OUTPUT_END, TOOL_OUTPUT_START, detect_suspicious_patterns,
+    sanitize_tool_output, truncate_with_notice, wrap_external_content, wrap_memory_content,
+    wrap_tool_output,
 };
 pub use session::{
+    DEFAULT_AGENT_ID, Session, SessionInfo, SessionMessage, SessionSearchResult, SessionStatus,
     get_last_session_id, get_last_session_id_for_agent, get_sessions_dir_for_agent, get_state_dir,
-    list_sessions, list_sessions_for_agent, search_sessions, search_sessions_for_agent, Session,
-    SessionInfo, SessionMessage, SessionSearchResult, SessionStatus, DEFAULT_AGENT_ID,
+    list_sessions, list_sessions_for_agent, search_sessions, search_sessions_for_agent,
 };
 pub use session_store::{SessionEntry, SessionStore};
-pub use skills::{get_skills_summary, load_skills, parse_skill_command, Skill, SkillInvocation};
+pub use skills::{Skill, SkillInvocation, get_skills_summary, load_skills, parse_skill_command};
 pub use system_prompt::{
-    build_heartbeat_prompt, is_heartbeat_ok, is_silent_reply, HEARTBEAT_OK_TOKEN,
-    SILENT_REPLY_TOKEN,
+    HEARTBEAT_OK_TOKEN, SILENT_REPLY_TOKEN, build_heartbeat_prompt, is_heartbeat_ok,
+    is_silent_reply,
 };
-pub use tools::{extract_tool_detail, Tool, ToolResult};
+pub use tools::{Tool, ToolResult, extract_tool_detail};
 
 use anyhow::Result;
 use std::path::PathBuf;
@@ -530,138 +530,138 @@ impl Agent {
         }
 
         // Load IDENTITY.md first (OpenClaw-compatible: agent identity context)
-        if let Ok(identity_content) = self.memory.read_identity_file() {
-            if !identity_content.is_empty() {
-                if use_delimiters {
-                    context.push_str(&sanitize::wrap_memory_content(
-                        "IDENTITY.md",
-                        &identity_content,
-                        sanitize::MemorySource::Identity,
-                    ));
-                } else {
-                    context.push_str("# Identity (IDENTITY.md)\n\n");
-                    context.push_str(&identity_content);
-                }
-                context.push_str("\n\n---\n\n");
+        if let Ok(identity_content) = self.memory.read_identity_file()
+            && !identity_content.is_empty()
+        {
+            if use_delimiters {
+                context.push_str(&sanitize::wrap_memory_content(
+                    "IDENTITY.md",
+                    &identity_content,
+                    sanitize::MemorySource::Identity,
+                ));
+            } else {
+                context.push_str("# Identity (IDENTITY.md)\n\n");
+                context.push_str(&identity_content);
             }
+            context.push_str("\n\n---\n\n");
         }
 
         // Load USER.md (OpenClaw-compatible: user info)
-        if let Ok(user_content) = self.memory.read_user_file() {
-            if !user_content.is_empty() {
-                if use_delimiters {
-                    context.push_str(&sanitize::wrap_memory_content(
-                        "USER.md",
-                        &user_content,
-                        sanitize::MemorySource::User,
-                    ));
-                } else {
-                    context.push_str("# User Info (USER.md)\n\n");
-                    context.push_str(&user_content);
-                }
-                context.push_str("\n\n---\n\n");
+        if let Ok(user_content) = self.memory.read_user_file()
+            && !user_content.is_empty()
+        {
+            if use_delimiters {
+                context.push_str(&sanitize::wrap_memory_content(
+                    "USER.md",
+                    &user_content,
+                    sanitize::MemorySource::User,
+                ));
+            } else {
+                context.push_str("# User Info (USER.md)\n\n");
+                context.push_str(&user_content);
             }
+            context.push_str("\n\n---\n\n");
         }
 
         // Load SOUL.md (persona/tone) - this defines who the agent is
-        if let Ok(soul_content) = self.memory.read_soul_file() {
-            if !soul_content.is_empty() {
-                if use_delimiters {
-                    context.push_str(&sanitize::wrap_memory_content(
-                        "SOUL.md",
-                        &soul_content,
-                        sanitize::MemorySource::Soul,
-                    ));
-                } else {
-                    context.push_str(&soul_content);
-                }
-                context.push_str("\n\n---\n\n");
+        if let Ok(soul_content) = self.memory.read_soul_file()
+            && !soul_content.is_empty()
+        {
+            if use_delimiters {
+                context.push_str(&sanitize::wrap_memory_content(
+                    "SOUL.md",
+                    &soul_content,
+                    sanitize::MemorySource::Soul,
+                ));
+            } else {
+                context.push_str(&soul_content);
             }
+            context.push_str("\n\n---\n\n");
         }
 
         // Load AGENTS.md (OpenClaw-compatible: list of connected agents)
-        if let Ok(agents_content) = self.memory.read_agents_file() {
-            if !agents_content.is_empty() {
-                if use_delimiters {
-                    context.push_str(&sanitize::wrap_memory_content(
-                        "AGENTS.md",
-                        &agents_content,
-                        sanitize::MemorySource::Agents,
-                    ));
-                } else {
-                    context.push_str("# Available Agents (AGENTS.md)\n\n");
-                    context.push_str(&agents_content);
-                }
-                context.push_str("\n\n---\n\n");
+        if let Ok(agents_content) = self.memory.read_agents_file()
+            && !agents_content.is_empty()
+        {
+            if use_delimiters {
+                context.push_str(&sanitize::wrap_memory_content(
+                    "AGENTS.md",
+                    &agents_content,
+                    sanitize::MemorySource::Agents,
+                ));
+            } else {
+                context.push_str("# Available Agents (AGENTS.md)\n\n");
+                context.push_str(&agents_content);
             }
+            context.push_str("\n\n---\n\n");
         }
 
         // Load TOOLS.md (OpenClaw-compatible: local tool notes)
-        if let Ok(tools_content) = self.memory.read_tools_file() {
-            if !tools_content.is_empty() {
-                if use_delimiters {
-                    context.push_str(&sanitize::wrap_memory_content(
-                        "TOOLS.md",
-                        &tools_content,
-                        sanitize::MemorySource::Tools,
-                    ));
-                } else {
-                    context.push_str("# Tool Notes (TOOLS.md)\n\n");
-                    context.push_str(&tools_content);
-                }
-                context.push_str("\n\n---\n\n");
+        if let Ok(tools_content) = self.memory.read_tools_file()
+            && !tools_content.is_empty()
+        {
+            if use_delimiters {
+                context.push_str(&sanitize::wrap_memory_content(
+                    "TOOLS.md",
+                    &tools_content,
+                    sanitize::MemorySource::Tools,
+                ));
+            } else {
+                context.push_str("# Tool Notes (TOOLS.md)\n\n");
+                context.push_str(&tools_content);
             }
+            context.push_str("\n\n---\n\n");
         }
 
         // Load MEMORY.md if it exists
-        if let Ok(memory_content) = self.memory.read_memory_file() {
-            if !memory_content.is_empty() {
-                if use_delimiters {
-                    context.push_str(&sanitize::wrap_memory_content(
-                        "MEMORY.md",
-                        &memory_content,
-                        sanitize::MemorySource::Memory,
-                    ));
-                } else {
-                    context.push_str("# Long-term Memory (MEMORY.md)\n\n");
-                    context.push_str(&memory_content);
-                }
-                context.push_str("\n\n");
+        if let Ok(memory_content) = self.memory.read_memory_file()
+            && !memory_content.is_empty()
+        {
+            if use_delimiters {
+                context.push_str(&sanitize::wrap_memory_content(
+                    "MEMORY.md",
+                    &memory_content,
+                    sanitize::MemorySource::Memory,
+                ));
+            } else {
+                context.push_str("# Long-term Memory (MEMORY.md)\n\n");
+                context.push_str(&memory_content);
             }
+            context.push_str("\n\n");
         }
 
         // Load today's and yesterday's daily logs
-        if let Ok(recent_logs) = self.memory.read_recent_daily_logs(2) {
-            if !recent_logs.is_empty() {
-                if use_delimiters {
-                    context.push_str(&sanitize::wrap_memory_content(
-                        "memory/*.md",
-                        &recent_logs,
-                        sanitize::MemorySource::DailyLog,
-                    ));
-                } else {
-                    context.push_str("# Recent Daily Logs\n\n");
-                    context.push_str(&recent_logs);
-                }
-                context.push_str("\n\n");
+        if let Ok(recent_logs) = self.memory.read_recent_daily_logs(2)
+            && !recent_logs.is_empty()
+        {
+            if use_delimiters {
+                context.push_str(&sanitize::wrap_memory_content(
+                    "memory/*.md",
+                    &recent_logs,
+                    sanitize::MemorySource::DailyLog,
+                ));
+            } else {
+                context.push_str("# Recent Daily Logs\n\n");
+                context.push_str(&recent_logs);
             }
+            context.push_str("\n\n");
         }
 
         // Load HEARTBEAT.md if it exists
-        if let Ok(heartbeat) = self.memory.read_heartbeat_file() {
-            if !heartbeat.is_empty() {
-                if use_delimiters {
-                    context.push_str(&sanitize::wrap_memory_content(
-                        "HEARTBEAT.md",
-                        &heartbeat,
-                        sanitize::MemorySource::Heartbeat,
-                    ));
-                } else {
-                    context.push_str("# Pending Tasks (HEARTBEAT.md)\n\n");
-                    context.push_str(&heartbeat);
-                }
-                context.push('\n');
+        if let Ok(heartbeat) = self.memory.read_heartbeat_file()
+            && !heartbeat.is_empty()
+        {
+            if use_delimiters {
+                context.push_str(&sanitize::wrap_memory_content(
+                    "HEARTBEAT.md",
+                    &heartbeat,
+                    sanitize::MemorySource::Heartbeat,
+                ));
+            } else {
+                context.push_str("# Pending Tasks (HEARTBEAT.md)\n\n");
+                context.push_str(&heartbeat);
             }
+            context.push('\n');
         }
 
         Ok(context)

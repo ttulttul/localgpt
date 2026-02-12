@@ -1,5 +1,5 @@
-use anyhow::{anyhow, Result};
-use rusqlite::{params, Connection};
+use anyhow::{Result, anyhow};
+use rusqlite::{Connection, params};
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -155,7 +155,7 @@ impl MemoryIndex {
 
         for path in ext_paths {
             // SAFETY: Loading sqlite-vec extension from trusted path
-            if unsafe { conn.load_extension(path, None) }.is_ok() {
+            if unsafe { conn.load_extension(path, None::<&str>) }.is_ok() {
                 let _ = conn.load_extension_disable();
                 return true;
             }

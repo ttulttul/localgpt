@@ -4,7 +4,7 @@ use futures::Stream;
 use futures::StreamExt;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::pin::Pin;
 use std::process::Stdio;
 use std::sync::Mutex as StdMutex;
@@ -146,7 +146,7 @@ pub type StreamResult = Pin<Box<dyn Stream<Item = Result<StreamChunk>> + Send>>;
 #[async_trait]
 pub trait LLMProvider: Send + Sync {
     async fn chat(&self, messages: &[Message], tools: Option<&[ToolSchema]>)
-        -> Result<LLMResponse>;
+    -> Result<LLMResponse>;
 
     async fn summarize(&self, text: &str) -> Result<String>;
 
@@ -424,19 +424,21 @@ impl OpenAIProvider {
                 });
 
                 if let Some(ref tool_calls) = m.tool_calls {
-                    msg["tool_calls"] = json!(tool_calls
-                        .iter()
-                        .map(|tc| {
-                            json!({
-                                "id": tc.id,
-                                "type": "function",
-                                "function": {
-                                    "name": tc.name,
-                                    "arguments": tc.arguments
-                                }
+                    msg["tool_calls"] = json!(
+                        tool_calls
+                            .iter()
+                            .map(|tc| {
+                                json!({
+                                    "id": tc.id,
+                                    "type": "function",
+                                    "function": {
+                                        "name": tc.name,
+                                        "arguments": tc.arguments
+                                    }
+                                })
                             })
-                        })
-                        .collect::<Vec<_>>());
+                            .collect::<Vec<_>>()
+                    );
                 }
 
                 if let Some(ref tool_call_id) = m.tool_call_id {
@@ -461,10 +463,10 @@ impl LLMProvider for OpenAIProvider {
             "messages": self.format_messages(messages)
         });
 
-        if let Some(tools) = tools {
-            if !tools.is_empty() {
-                body["tools"] = json!(self.format_tools(tools));
-            }
+        if let Some(tools) = tools
+            && !tools.is_empty()
+        {
+            body["tools"] = json!(self.format_tools(tools));
         }
 
         debug!("OpenAI request: {}", serde_json::to_string_pretty(&body)?);
@@ -502,26 +504,26 @@ impl LLMProvider for OpenAIProvider {
         });
 
         // Check for tool calls
-        if let Some(tool_calls) = message.get("tool_calls") {
-            if let Some(calls) = tool_calls.as_array() {
-                let parsed_calls: Vec<ToolCall> = calls
-                    .iter()
-                    .map(|tc| ToolCall {
-                        id: tc["id"].as_str().unwrap_or("").to_string(),
-                        name: tc["function"]["name"].as_str().unwrap_or("").to_string(),
-                        arguments: tc["function"]["arguments"]
-                            .as_str()
-                            .unwrap_or("{}")
-                            .to_string(),
-                    })
-                    .collect();
+        if let Some(tool_calls) = message.get("tool_calls")
+            && let Some(calls) = tool_calls.as_array()
+        {
+            let parsed_calls: Vec<ToolCall> = calls
+                .iter()
+                .map(|tc| ToolCall {
+                    id: tc["id"].as_str().unwrap_or("").to_string(),
+                    name: tc["function"]["name"].as_str().unwrap_or("").to_string(),
+                    arguments: tc["function"]["arguments"]
+                        .as_str()
+                        .unwrap_or("{}")
+                        .to_string(),
+                })
+                .collect();
 
-                if !parsed_calls.is_empty() {
-                    return Ok(LLMResponse {
-                        content: LLMResponseContent::ToolCalls(parsed_calls),
-                        usage,
-                    });
-                }
+            if !parsed_calls.is_empty() {
+                return Ok(LLMResponse {
+                    content: LLMResponseContent::ToolCalls(parsed_calls),
+                    usage,
+                });
             }
         }
 
@@ -690,10 +692,10 @@ impl LLMProvider for AnthropicProvider {
             body["system"] = json!(system);
         }
 
-        if let Some(tools) = tools {
-            if !tools.is_empty() {
-                body["tools"] = json!(self.format_tools(tools));
-            }
+        if let Some(tools) = tools
+            && !tools.is_empty()
+        {
+            body["tools"] = json!(self.format_tools(tools));
         }
 
         debug!(
@@ -801,10 +803,10 @@ impl LLMProvider for AnthropicProvider {
         }
 
         // Include tools so the model uses native tool_use instead of XML
-        if let Some(tools) = tools {
-            if !tools.is_empty() {
-                body["tools"] = json!(self.format_tools(tools));
-            }
+        if let Some(tools) = tools
+            && !tools.is_empty()
+        {
+            body["tools"] = json!(self.format_tools(tools));
         }
 
         debug!(
@@ -889,13 +891,12 @@ impl LLMProvider for AnthropicProvider {
 
                                             // Tool use block started
                                             "content_block_start" => {
-                                                if let Some(content_block) = json.get("content_block") {
-                                                    if content_block["type"] == "tool_use" {
+                                                if let Some(content_block) = json.get("content_block")
+                                                    && content_block["type"] == "tool_use" {
                                                         current_tool_id = content_block["id"].as_str().map(|s| s.to_string());
                                                         current_tool_name = content_block["name"].as_str().map(|s| s.to_string());
                                                         current_tool_input.clear();
                                                     }
-                                                }
                                             }
 
                                             // Content block finished
@@ -988,14 +989,13 @@ impl LLMProvider for OllamaProvider {
                     "content": m.content
                 });
                 // Include tool_call_id for tool role messages
-                if m.role == Role::Tool {
-                    if let Some(ref id) = m.tool_call_id {
+                if m.role == Role::Tool
+                    && let Some(ref id) = m.tool_call_id {
                         msg["tool_call_id"] = json!(id);
                     }
-                }
                 // Include tool_calls for assistant messages that had them
-                if m.role == Role::Assistant {
-                    if let Some(ref calls) = m.tool_calls {
+                if m.role == Role::Assistant
+                    && let Some(ref calls) = m.tool_calls {
                         let tc: Vec<Value> = calls.iter().map(|c| json!({
                             "function": {
                                 "name": c.name,
@@ -1004,7 +1004,6 @@ impl LLMProvider for OllamaProvider {
                         })).collect();
                         msg["tool_calls"] = json!(tc);
                     }
-                }
                 msg
             })
             .collect();
@@ -1016,23 +1015,23 @@ impl LLMProvider for OllamaProvider {
         });
 
         // Send tool schemas if provided
-        if let Some(tool_schemas) = tools {
-            if !tool_schemas.is_empty() {
-                let tools_json: Vec<Value> = tool_schemas
-                    .iter()
-                    .map(|t| {
-                        json!({
-                            "type": "function",
-                            "function": {
-                                "name": t.name,
-                                "description": t.description,
-                                "parameters": t.parameters
-                            }
-                        })
+        if let Some(tool_schemas) = tools
+            && !tool_schemas.is_empty()
+        {
+            let tools_json: Vec<Value> = tool_schemas
+                .iter()
+                .map(|t| {
+                    json!({
+                        "type": "function",
+                        "function": {
+                            "name": t.name,
+                            "description": t.description,
+                            "parameters": t.parameters
+                        }
                     })
-                    .collect();
-                body["tools"] = json!(tools_json);
-            }
+                })
+                .collect();
+            body["tools"] = json!(tools_json);
         }
 
         debug!("Ollama request: {}", serde_json::to_string_pretty(&body)?);
@@ -1093,32 +1092,32 @@ impl LLMProvider for OllamaProvider {
         };
 
         // Check for tool calls in response
-        if let Some(tool_calls) = response_body["message"]["tool_calls"].as_array() {
-            if !tool_calls.is_empty() {
-                let calls: Vec<ToolCall> = tool_calls
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(i, tc)| {
-                        let name = tc["function"]["name"].as_str()?.to_string();
-                        let arguments = if tc["function"]["arguments"].is_object() {
-                            serde_json::to_string(&tc["function"]["arguments"]).ok()?
-                        } else {
-                            tc["function"]["arguments"].as_str()?.to_string()
-                        };
-                        Some(ToolCall {
-                            id: format!("call_{}", i),
-                            name,
-                            arguments,
-                        })
+        if let Some(tool_calls) = response_body["message"]["tool_calls"].as_array()
+            && !tool_calls.is_empty()
+        {
+            let calls: Vec<ToolCall> = tool_calls
+                .iter()
+                .enumerate()
+                .filter_map(|(i, tc)| {
+                    let name = tc["function"]["name"].as_str()?.to_string();
+                    let arguments = if tc["function"]["arguments"].is_object() {
+                        serde_json::to_string(&tc["function"]["arguments"]).ok()?
+                    } else {
+                        tc["function"]["arguments"].as_str()?.to_string()
+                    };
+                    Some(ToolCall {
+                        id: format!("call_{}", i),
+                        name,
+                        arguments,
                     })
-                    .collect();
+                })
+                .collect();
 
-                if !calls.is_empty() {
-                    return Ok(LLMResponse {
-                        content: LLMResponseContent::ToolCalls(calls),
-                        usage,
-                    });
-                }
+            if !calls.is_empty() {
+                return Ok(LLMResponse {
+                    content: LLMResponseContent::ToolCalls(calls),
+                    usage,
+                });
             }
         }
 
@@ -1430,11 +1429,9 @@ impl ClaudeCliProvider {
 
         // System prompt (new sessions only)
         // Use --system-prompt to SET the prompt (not --append-system-prompt which appends)
-        if is_new_session {
-            if let Some(sys) = system_prompt {
-                args.push("--system-prompt".to_string());
-                args.push(sys.to_string());
-            }
+        if is_new_session && let Some(sys) = system_prompt {
+            args.push("--system-prompt".to_string());
+            args.push(sys.to_string());
         }
 
         // CLI session handling
@@ -1724,8 +1721,8 @@ impl LLMProvider for ClaudeCliProvider {
                     match event_type {
                         // System init - show model info
                         "system" => {
-                            if json.get("subtype").and_then(|v| v.as_str()) == Some("init") {
-                                if let Some(model) = json.get("model").and_then(|v| v.as_str()) {
+                            if json.get("subtype").and_then(|v| v.as_str()) == Some("init")
+                                && let Some(model) = json.get("model").and_then(|v| v.as_str()) {
                                     let tools_count = json.get("tools")
                                         .and_then(|v| v.as_array())
                                         .map(|a| a.len())
@@ -1736,7 +1733,6 @@ impl LLMProvider for ClaudeCliProvider {
                                         tool_calls: None,
                                     });
                                 }
-                            }
                         }
 
                         // Assistant message with content (streaming updates)

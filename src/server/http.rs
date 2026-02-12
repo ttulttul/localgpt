@@ -5,17 +5,17 @@
 
 use anyhow::Result;
 use axum::{
+    Router,
     extract::{
-        ws::{Message as WsMessage, WebSocket, WebSocketUpgrade},
         Path, Query, State,
+        ws::{Message as WsMessage, WebSocket, WebSocketUpgrade},
     },
-    http::{header, StatusCode},
+    http::{StatusCode, header},
     response::{
-        sse::{Event, Sse},
         IntoResponse, Json, Response,
+        sse::{Event, Sse},
     },
     routing::{delete, get, post},
-    Router,
 };
 use futures::{SinkExt, StreamExt};
 use rust_embed::RustEmbed;
@@ -30,10 +30,10 @@ use tokio::sync::Mutex;
 use tower_http::cors::{Any, CorsLayer};
 use tracing::{debug, info};
 
-use crate::agent::{extract_tool_detail, Agent, AgentConfig, StreamEvent};
+use crate::agent::{Agent, AgentConfig, StreamEvent, extract_tool_detail};
 use crate::concurrency::{TurnGate, WorkspaceLock};
 use crate::config::Config;
-use crate::heartbeat::{get_last_heartbeat_event, HeartbeatStatus};
+use crate::heartbeat::{HeartbeatStatus, get_last_heartbeat_event};
 use crate::memory::MemoryManager;
 
 /// Embedded UI assets
@@ -274,14 +274,14 @@ async fn get_or_create_session(
     let mut sessions = state.sessions.lock().await;
 
     // If session_id provided, try to use existing session
-    if let Some(ref id) = session_id {
-        if sessions.contains_key(id) {
-            // Update last accessed time
-            if let Some(entry) = sessions.get_mut(id) {
-                entry.last_accessed = Instant::now();
-            }
-            return Ok(id.clone());
+    if let Some(ref id) = session_id
+        && sessions.contains_key(id)
+    {
+        // Update last accessed time
+        if let Some(entry) = sessions.get_mut(id) {
+            entry.last_accessed = Instant::now();
         }
+        return Ok(id.clone());
     }
 
     // Check session limit
@@ -666,14 +666,14 @@ async fn chat(State(state): State<Arc<AppState>>, Json(request): Json<ChatReques
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("Failed to acquire workspace lock: {}", e),
             )
-            .into_response()
+            .into_response();
         }
         Err(e) => {
             return AppError(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("Lock task error: {}", e),
             )
-            .into_response()
+            .into_response();
         }
     };
 
@@ -682,18 +682,18 @@ async fn chat(State(state): State<Arc<AppState>>, Json(request): Json<ChatReques
     let entry = match sessions.get_mut(&session_id) {
         Some(e) => e,
         None => {
-            return AppError(StatusCode::NOT_FOUND, "Session not found".to_string()).into_response()
+            return AppError(StatusCode::NOT_FOUND, "Session not found".to_string())
+                .into_response();
         }
     };
 
     entry.last_accessed = Instant::now();
 
     // Switch model if requested
-    if let Some(ref model) = request.model {
-        if let Err(e) = entry.agent.set_model(model) {
-            return AppError(StatusCode::BAD_REQUEST, format!("Invalid model: {}", e))
-                .into_response();
-        }
+    if let Some(ref model) = request.model
+        && let Err(e) = entry.agent.set_model(model)
+    {
+        return AppError(StatusCode::BAD_REQUEST, format!("Invalid model: {}", e)).into_response();
     }
 
     let result = entry.agent.chat(&request.message).await;
@@ -1116,7 +1116,7 @@ async fn get_saved_session(Path(session_id): Path<String>) -> Response {
     let sessions_dir = match get_sessions_dir_for_agent(HTTP_AGENT_ID) {
         Ok(dir) => dir,
         Err(e) => {
-            return AppError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
+            return AppError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
         }
     };
 
@@ -1129,7 +1129,7 @@ async fn get_saved_session(Path(session_id): Path<String>) -> Response {
     let file = match File::open(&session_path) {
         Ok(f) => f,
         Err(e) => {
-            return AppError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
+            return AppError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
         }
     };
 
@@ -1155,49 +1155,49 @@ async fn get_saved_session(Path(session_id): Path<String>) -> Response {
         }
 
         // Parse message entries
-        if parsed["type"].as_str() == Some("message") {
-            if let Some(msg) = parsed.get("message") {
-                let role = msg["role"].as_str().unwrap_or("unknown").to_string();
+        if parsed["type"].as_str() == Some("message")
+            && let Some(msg) = parsed.get("message")
+        {
+            let role = msg["role"].as_str().unwrap_or("unknown").to_string();
 
-                // Extract text content
-                let content = if let Some(content_arr) = msg["content"].as_array() {
-                    content_arr
-                        .iter()
-                        .filter_map(|c| {
-                            if c["type"].as_str() == Some("text") {
-                                c["text"].as_str().map(String::from)
-                            } else {
-                                None
-                            }
-                        })
-                        .collect::<Vec<_>>()
-                        .join("\n")
-                } else if let Some(text) = msg["content"].as_str() {
-                    text.to_string()
+            // Extract text content
+            let content = if let Some(content_arr) = msg["content"].as_array() {
+                content_arr
+                    .iter()
+                    .filter_map(|c| {
+                        if c["type"].as_str() == Some("text") {
+                            c["text"].as_str().map(String::from)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            } else if let Some(text) = msg["content"].as_str() {
+                text.to_string()
+            } else {
+                String::new()
+            };
+
+            // Extract tool calls
+            let tool_calls = msg["toolCalls"].as_array().cloned();
+
+            // Extract tool result ID
+            let tool_call_id = msg["toolCallId"].as_str().map(String::from);
+
+            let timestamp = msg["timestamp"].as_u64();
+
+            messages.push(SavedSessionMessage {
+                role,
+                content: if content.is_empty() {
+                    None
                 } else {
-                    String::new()
-                };
-
-                // Extract tool calls
-                let tool_calls = msg["toolCalls"].as_array().cloned();
-
-                // Extract tool result ID
-                let tool_call_id = msg["toolCallId"].as_str().map(String::from);
-
-                let timestamp = msg["timestamp"].as_u64();
-
-                messages.push(SavedSessionMessage {
-                    role,
-                    content: if content.is_empty() {
-                        None
-                    } else {
-                        Some(content)
-                    },
-                    tool_calls,
-                    tool_call_id,
-                    timestamp,
-                });
-            }
+                    Some(content)
+                },
+                tool_calls,
+                tool_call_id,
+                timestamp,
+            });
         }
     }
 
@@ -1232,7 +1232,7 @@ async fn get_daemon_logs(Query(query): Query<LogsQuery>) -> Response {
     let state_dir = match get_state_dir() {
         Ok(dir) => dir,
         Err(e) => {
-            return AppError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
+            return AppError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
         }
     };
 
@@ -1254,14 +1254,14 @@ async fn get_daemon_logs(Query(query): Query<LogsQuery>) -> Response {
     let metadata = match std::fs::metadata(&log_path) {
         Ok(m) => m,
         Err(e) => {
-            return AppError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
+            return AppError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
         }
     };
 
     let file = match File::open(&log_path) {
         Ok(f) => f,
         Err(e) => {
-            return AppError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
+            return AppError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
         }
     };
 

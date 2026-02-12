@@ -67,7 +67,7 @@ fn detect_linux() -> SandboxCapabilities {
 fn probe_landlock_abi() -> Option<u32> {
     // Try to detect the supported Landlock ABI version.
     // We try each ABI from highest to lowest.
-    use landlock::{Access, AccessFs, Ruleset, RulesetAttr, ABI};
+    use landlock::{ABI, Access, AccessFs, Ruleset, RulesetAttr};
 
     for (abi, version) in [
         (ABI::V5, 5u32),
