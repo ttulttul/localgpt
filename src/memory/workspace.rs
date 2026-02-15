@@ -9,16 +9,14 @@ use tracing::info;
 
 /// Initialize workspace with default templates if files don't exist.
 /// Returns true if this is a brand new workspace (all key files were missing).
-pub fn init_workspace(workspace: &Path) -> Result<bool> {
+pub fn init_workspace(workspace: &Path, paths: &crate::paths::Paths) -> Result<bool> {
     // Ensure directories exist
     fs::create_dir_all(workspace)?;
     fs::create_dir_all(workspace.join("memory"))?;
     fs::create_dir_all(workspace.join("skills"))?;
 
-    // Also init the parent state directory (.gitignore for sessions/logs)
-    if let Some(state_dir) = workspace.parent() {
-        init_state_dir(state_dir)?;
-    }
+    // Init state/data directories and ensure device key
+    init_state_dir(paths)?;
 
     // Check if this is a brand new workspace (all key files missing)
     let key_files = [
@@ -47,6 +45,13 @@ pub fn init_workspace(workspace: &Path) -> Result<bool> {
     if !soul_path.exists() {
         fs::write(&soul_path, SOUL_TEMPLATE)?;
         info!("Created {}", soul_path.display());
+    }
+
+    // Create LocalGPT.md security policy template if it doesn't exist
+    let policy_path = workspace.join(crate::security::POLICY_FILENAME);
+    if !policy_path.exists() {
+        fs::write(&policy_path, LOCALGPT_POLICY_TEMPLATE)?;
+        info!("Created {}", policy_path.display());
     }
 
     // Create .gitignore if it doesn't exist
@@ -121,6 +126,29 @@ If you change this file, tell the user — it's your soul, and they should know.
 _This file is yours to evolve. As you learn who you are, update it._
 "#;
 
+const LOCALGPT_POLICY_TEMPLATE: &str = r#"# LocalGPT.md
+
+Your standing instructions to the AI — always present, near the end.
+
+Whatever you write here is injected near the end of every conversation turn,
+just before a hardcoded security suffix. Use it for conventions, boundaries,
+preferences, and reminders you want the AI to always follow.
+
+Edit this file, then run `localgpt md sign` to activate changes.
+
+## Conventions
+
+- (Add your coding standards and project conventions here)
+
+## Boundaries
+
+- (Add security rules and access restrictions here)
+
+## Reminders
+
+- (Add things the AI tends to forget in long sessions)
+"#;
+
 const GITIGNORE_TEMPLATE: &str = r#"# LocalGPT workspace .gitignore
 
 # Nothing to ignore in workspace by default
@@ -128,9 +156,13 @@ const GITIGNORE_TEMPLATE: &str = r#"# LocalGPT workspace .gitignore
 # - MEMORY.md (curated knowledge)
 # - HEARTBEAT.md (pending tasks)
 # - SOUL.md (persona)
+# - LocalGPT.md (security policy)
 # - memory/*.md (daily logs)
 # - skills/ (custom skills)
 
+# Security manifest (managed by localgpt md sign)
+.localgpt_manifest.json
+
 # Temporary files
 *.tmp
 *.swp
@@ -138,49 +170,15 @@ const GITIGNORE_TEMPLATE: &str = r#"# LocalGPT workspace .gitignore
 .DS_Store
 "#;
 
-/// Initialize state directory with .gitignore
-pub fn init_state_dir(state_dir: &Path) -> Result<()> {
-    fs::create_dir_all(state_dir)?;
+/// Initialize state directory with .gitignore and device key.
+/// Ensures all XDG directories exist and device key is present.
+pub fn init_state_dir(paths: &crate::paths::Paths) -> Result<()> {
+    fs::create_dir_all(&paths.state_dir)?;
+    fs::create_dir_all(&paths.data_dir)?;
+    fs::create_dir_all(&paths.cache_dir)?;
 
-    let gitignore_path = state_dir.join(".gitignore");
-    if !gitignore_path.exists() {
-        fs::write(&gitignore_path, STATE_GITIGNORE_TEMPLATE)?;
-        info!("Created {}", gitignore_path.display());
-    }
+    // Ensure device key exists for security policy signing (lives in data_dir)
+    crate::security::ensure_device_key(&paths.data_dir)?;
 
     Ok(())
 }
-
-const STATE_GITIGNORE_TEMPLATE: &str = r#"# LocalGPT state directory .gitignore
-
-# Session transcripts (large, ephemeral)
-agents/*/sessions/*.jsonl
-
-# Keep sessions.json (small metadata with CLI session IDs)
-!agents/*/sessions/sessions.json
-
-# Daemon PID file
-daemon.pid
-
-# Logs
-logs/
-
-# Memory index SQLite database (OpenClaw-compatible location)
-memory/*.sqlite
-memory/*.sqlite-wal
-memory/*.sqlite-shm
-
-# Database files (legacy)
-*.db
-*.db-wal
-*.db-shm
-
-# Config may contain API keys - be careful
-# config.toml
-
-# Temporary files
-*.tmp
-*.swp
-*~
-.DS_Store
-"#;

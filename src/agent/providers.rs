@@ -4,7 +4,7 @@ use futures::Stream;
 use futures::StreamExt;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::pin::Pin;
 use std::process::Stdio;
 use std::sync::Mutex as StdMutex;
@@ -135,6 +135,7 @@ pub enum StreamEvent {
         name: String,
         id: String,
         output: String,
+        warnings: Vec<String>,
     },
     /// Stream completed
     Done,
@@ -145,31 +146,41 @@ pub type StreamResult = Pin<Box<dyn Stream<Item = Result<StreamChunk>> + Send>>;
 #[async_trait]
 pub trait LLMProvider: Send + Sync {
     async fn chat(&self, messages: &[Message], tools: Option<&[ToolSchema]>)
-        -> Result<LLMResponse>;
+    -> Result<LLMResponse>;
 
     async fn summarize(&self, text: &str) -> Result<String>;
+
+    /// Reset provider session state (e.g., clear cached CLI session ID).
+    /// Called when starting a new conversation via `/new`.
+    /// Default: no-op (most providers are stateless).
+    fn reset_session(&self) {}
 
     /// Stream chat response (default: falls back to non-streaming)
     async fn chat_stream(
         &self,
         messages: &[Message],
-        _tools: Option<&[ToolSchema]>,
+        tools: Option<&[ToolSchema]>,
     ) -> Result<StreamResult> {
         // Default implementation: single chunk with full response
-        let resp = self.chat(messages, None).await?;
-        let text = match resp.content {
-            LLMResponseContent::Text(t) => t,
-            LLMResponseContent::ToolCalls(_) => {
-                return Err(anyhow::anyhow!("Tool calls not supported in streaming"))
+        let resp = self.chat(messages, tools).await?;
+        match resp.content {
+            LLMResponseContent::Text(text) => Ok(Box::pin(futures::stream::once(async move {
+                Ok(StreamChunk {
+                    delta: text,
+                    done: true,
+                    tool_calls: None,
+                })
+            }))),
+            LLMResponseContent::ToolCalls(calls) => {
+                Ok(Box::pin(futures::stream::once(async move {
+                    Ok(StreamChunk {
+                        delta: String::new(),
+                        done: true,
+                        tool_calls: Some(calls),
+                    })
+                })))
             }
-        };
-        Ok(Box::pin(futures::stream::once(async move {
-            Ok(StreamChunk {
-                delta: text,
-                done: true,
-                tool_calls: None,
-            })
-        })))
+        }
     }
 }
 
@@ -182,6 +193,7 @@ fn resolve_model_alias(model: &str) -> String {
         "sonnet" => "anthropic/claude-sonnet-4-5".to_string(),
         "gpt" => "openai/gpt-4o".to_string(),
         "gpt-mini" => "openai/gpt-4o-mini".to_string(),
+        "glm" => "glm/glm-4.7".to_string(),
         _ => model.to_string(),
     }
 }
@@ -217,6 +229,8 @@ pub fn create_provider(model: &str, config: &Config) -> Result<Box<dyn LLMProvid
         ("openai".to_string(), model.clone())
     } else if model.starts_with("claude-") {
         ("anthropic".to_string(), model.clone())
+    } else if model.starts_with("glm-") {
+        ("glm".to_string(), model.clone())
     } else {
         // Default to anthropic for unknown models, or ollama if configured
         if config.providers.ollama.is_some() {
@@ -289,6 +303,23 @@ pub fn create_provider(model: &str, config: &Config) -> Result<Box<dyn LLMProvid
             )?))
         }
 
+        "glm" => {
+            let glm_config = config.providers.glm.as_ref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "GLM provider not configured.\n\
+                    Set GLM_API_KEY env var or add to ~/.localgpt/config.toml:\n\n\
+                    [providers.glm]\n\
+                    api_key = \"your-glm-api-key\""
+                )
+            })?;
+
+            Ok(Box::new(OpenAIProvider::new(
+                &glm_config.api_key,
+                &glm_config.base_url,
+                &model_id,
+            )?))
+        }
+
         _ => {
             // Fallback: try Claude CLI if configured
             if let Some(cli_config) = &config.providers.claude_cli {
@@ -304,9 +335,10 @@ pub fn create_provider(model: &str, config: &Config) -> Result<Box<dyn LLMProvid
                 Supported formats (OpenClaw-compatible):\n  \
                 - anthropic/claude-opus-4-5, anthropic/claude-sonnet-4-5\n  \
                 - openai/gpt-4o, openai/gpt-4o-mini\n  \
+                - glm/glm-4.7\n  \
                 - claude-cli/opus, claude-cli/sonnet\n  \
                 - ollama/llama3, ollama/mistral\n\n\
-                Or use aliases: opus, sonnet, haiku, gpt, gpt-mini",
+                Or use aliases: opus, sonnet, haiku, gpt, gpt-mini, glm",
                 provider,
                 model
             )
@@ -392,19 +424,21 @@ impl OpenAIProvider {
                 });
 
                 if let Some(ref tool_calls) = m.tool_calls {
-                    msg["tool_calls"] = json!(tool_calls
-                        .iter()
-                        .map(|tc| {
-                            json!({
-                                "id": tc.id,
-                                "type": "function",
-                                "function": {
-                                    "name": tc.name,
-                                    "arguments": tc.arguments
-                                }
+                    msg["tool_calls"] = json!(
+                        tool_calls
+                            .iter()
+                            .map(|tc| {
+                                json!({
+                                    "id": tc.id,
+                                    "type": "function",
+                                    "function": {
+                                        "name": tc.name,
+                                        "arguments": tc.arguments
+                                    }
+                                })
                             })
-                        })
-                        .collect::<Vec<_>>());
+                            .collect::<Vec<_>>()
+                    );
                 }
 
                 if let Some(ref tool_call_id) = m.tool_call_id {
@@ -429,10 +463,10 @@ impl LLMProvider for OpenAIProvider {
             "messages": self.format_messages(messages)
         });
 
-        if let Some(tools) = tools {
-            if !tools.is_empty() {
-                body["tools"] = json!(self.format_tools(tools));
-            }
+        if let Some(tools) = tools
+            && !tools.is_empty()
+        {
+            body["tools"] = json!(self.format_tools(tools));
         }
 
         debug!("OpenAI request: {}", serde_json::to_string_pretty(&body)?);
@@ -470,26 +504,26 @@ impl LLMProvider for OpenAIProvider {
         });
 
         // Check for tool calls
-        if let Some(tool_calls) = message.get("tool_calls") {
-            if let Some(calls) = tool_calls.as_array() {
-                let parsed_calls: Vec<ToolCall> = calls
-                    .iter()
-                    .map(|tc| ToolCall {
-                        id: tc["id"].as_str().unwrap_or("").to_string(),
-                        name: tc["function"]["name"].as_str().unwrap_or("").to_string(),
-                        arguments: tc["function"]["arguments"]
-                            .as_str()
-                            .unwrap_or("{}")
-                            .to_string(),
-                    })
-                    .collect();
+        if let Some(tool_calls) = message.get("tool_calls")
+            && let Some(calls) = tool_calls.as_array()
+        {
+            let parsed_calls: Vec<ToolCall> = calls
+                .iter()
+                .map(|tc| ToolCall {
+                    id: tc["id"].as_str().unwrap_or("").to_string(),
+                    name: tc["function"]["name"].as_str().unwrap_or("").to_string(),
+                    arguments: tc["function"]["arguments"]
+                        .as_str()
+                        .unwrap_or("{}")
+                        .to_string(),
+                })
+                .collect();
 
-                if !parsed_calls.is_empty() {
-                    return Ok(LLMResponse {
-                        content: LLMResponseContent::ToolCalls(parsed_calls),
-                        usage,
-                    });
-                }
+            if !parsed_calls.is_empty() {
+                return Ok(LLMResponse {
+                    content: LLMResponseContent::ToolCalls(parsed_calls),
+                    usage,
+                });
             }
         }
 
@@ -658,10 +692,10 @@ impl LLMProvider for AnthropicProvider {
             body["system"] = json!(system);
         }
 
-        if let Some(tools) = tools {
-            if !tools.is_empty() {
-                body["tools"] = json!(self.format_tools(tools));
-            }
+        if let Some(tools) = tools
+            && !tools.is_empty()
+        {
+            body["tools"] = json!(self.format_tools(tools));
         }
 
         debug!(
@@ -769,10 +803,10 @@ impl LLMProvider for AnthropicProvider {
         }
 
         // Include tools so the model uses native tool_use instead of XML
-        if let Some(tools) = tools {
-            if !tools.is_empty() {
-                body["tools"] = json!(self.format_tools(tools));
-            }
+        if let Some(tools) = tools
+            && !tools.is_empty()
+        {
+            body["tools"] = json!(self.format_tools(tools));
         }
 
         debug!(
@@ -857,13 +891,12 @@ impl LLMProvider for AnthropicProvider {
 
                                             // Tool use block started
                                             "content_block_start" => {
-                                                if let Some(content_block) = json.get("content_block") {
-                                                    if content_block["type"] == "tool_use" {
+                                                if let Some(content_block) = json.get("content_block")
+                                                    && content_block["type"] == "tool_use" {
                                                         current_tool_id = content_block["id"].as_str().map(|s| s.to_string());
                                                         current_tool_name = content_block["name"].as_str().map(|s| s.to_string());
                                                         current_tool_input.clear();
                                                     }
-                                                }
                                             }
 
                                             // Content block finished
@@ -941,29 +974,65 @@ impl LLMProvider for OllamaProvider {
     async fn chat(
         &self,
         messages: &[Message],
-        _tools: Option<&[ToolSchema]>,
+        tools: Option<&[ToolSchema]>,
     ) -> Result<LLMResponse> {
-        // Note: Ollama tool support is limited, so we format as plain chat
         let formatted_messages: Vec<Value> = messages
             .iter()
             .map(|m| {
-                json!({
+                let mut msg = json!({
                     "role": match m.role {
                         Role::System => "system",
                         Role::User => "user",
                         Role::Assistant => "assistant",
-                        Role::Tool => "user", // Treat tool results as user messages
+                        Role::Tool => "tool",
                     },
                     "content": m.content
-                })
+                });
+                // Include tool_call_id for tool role messages
+                if m.role == Role::Tool
+                    && let Some(ref id) = m.tool_call_id {
+                        msg["tool_call_id"] = json!(id);
+                    }
+                // Include tool_calls for assistant messages that had them
+                if m.role == Role::Assistant
+                    && let Some(ref calls) = m.tool_calls {
+                        let tc: Vec<Value> = calls.iter().map(|c| json!({
+                            "function": {
+                                "name": c.name,
+                                "arguments": serde_json::from_str::<Value>(&c.arguments).unwrap_or(json!({}))
+                            }
+                        })).collect();
+                        msg["tool_calls"] = json!(tc);
+                    }
+                msg
             })
             .collect();
 
-        let body = json!({
+        let mut body = json!({
             "model": self.model,
             "messages": formatted_messages,
             "stream": false
         });
+
+        // Send tool schemas if provided
+        if let Some(tool_schemas) = tools
+            && !tool_schemas.is_empty()
+        {
+            let tools_json: Vec<Value> = tool_schemas
+                .iter()
+                .map(|t| {
+                    json!({
+                        "type": "function",
+                        "function": {
+                            "name": t.name,
+                            "description": t.description,
+                            "parameters": t.parameters
+                        }
+                    })
+                })
+                .collect();
+            body["tools"] = json!(tools_json);
+        }
 
         debug!("Ollama request: {}", serde_json::to_string_pretty(&body)?);
 
@@ -975,16 +1044,42 @@ impl LLMProvider for OllamaProvider {
             .send()
             .await?;
 
+        // If Ollama returns 400 (model doesn't support tools), retry without tools
+        if response.status() == reqwest::StatusCode::BAD_REQUEST && body.get("tools").is_some() {
+            debug!("Ollama returned 400 with tools, retrying without tools");
+            let mut body_no_tools = body.clone();
+            body_no_tools.as_object_mut().map(|o| o.remove("tools"));
+            let retry_response = self
+                .client
+                .post(format!("{}/api/chat", self.endpoint))
+                .header("Content-Type", "application/json")
+                .json(&body_no_tools)
+                .send()
+                .await?;
+            let response_body: Value = retry_response.json().await?;
+            let content = response_body["message"]["content"]
+                .as_str()
+                .unwrap_or("")
+                .to_string();
+            let usage = if response_body.get("prompt_eval_count").is_some() {
+                Some(Usage {
+                    input_tokens: response_body["prompt_eval_count"].as_u64().unwrap_or(0),
+                    output_tokens: response_body["eval_count"].as_u64().unwrap_or(0),
+                })
+            } else {
+                None
+            };
+            return Ok(LLMResponse {
+                content: LLMResponseContent::Text(content),
+                usage,
+            });
+        }
+
         let response_body: Value = response.json().await?;
         debug!(
             "Ollama response: {}",
             serde_json::to_string_pretty(&response_body)?
         );
-
-        let content = response_body["message"]["content"]
-            .as_str()
-            .unwrap_or("")
-            .to_string();
 
         // Ollama returns token counts in prompt_eval_count and eval_count
         let usage = if response_body.get("prompt_eval_count").is_some() {
@@ -995,6 +1090,41 @@ impl LLMProvider for OllamaProvider {
         } else {
             None
         };
+
+        // Check for tool calls in response
+        if let Some(tool_calls) = response_body["message"]["tool_calls"].as_array()
+            && !tool_calls.is_empty()
+        {
+            let calls: Vec<ToolCall> = tool_calls
+                .iter()
+                .enumerate()
+                .filter_map(|(i, tc)| {
+                    let name = tc["function"]["name"].as_str()?.to_string();
+                    let arguments = if tc["function"]["arguments"].is_object() {
+                        serde_json::to_string(&tc["function"]["arguments"]).ok()?
+                    } else {
+                        tc["function"]["arguments"].as_str()?.to_string()
+                    };
+                    Some(ToolCall {
+                        id: format!("call_{}", i),
+                        name,
+                        arguments,
+                    })
+                })
+                .collect();
+
+            if !calls.is_empty() {
+                return Ok(LLMResponse {
+                    content: LLMResponseContent::ToolCalls(calls),
+                    usage,
+                });
+            }
+        }
+
+        let content = response_body["message"]["content"]
+            .as_str()
+            .unwrap_or("")
+            .to_string();
 
         Ok(LLMResponse {
             content: LLMResponseContent::Text(content),
@@ -1023,8 +1153,31 @@ impl LLMProvider for OllamaProvider {
     async fn chat_stream(
         &self,
         messages: &[Message],
-        _tools: Option<&[ToolSchema]>,
+        tools: Option<&[ToolSchema]>,
     ) -> Result<StreamResult> {
+        // For tool-enabled requests, use non-streaming to properly handle tool calls
+        if tools.is_some() && tools.map(|t| !t.is_empty()).unwrap_or(false) {
+            let resp = self.chat(messages, tools).await?;
+            return match resp.content {
+                LLMResponseContent::Text(text) => Ok(Box::pin(futures::stream::once(async move {
+                    Ok(StreamChunk {
+                        delta: text,
+                        done: true,
+                        tool_calls: None,
+                    })
+                }))),
+                LLMResponseContent::ToolCalls(calls) => {
+                    Ok(Box::pin(futures::stream::once(async move {
+                        Ok(StreamChunk {
+                            delta: String::new(),
+                            done: true,
+                            tool_calls: Some(calls),
+                        })
+                    })))
+                }
+            };
+        }
+
         let formatted_messages: Vec<Value> = messages
             .iter()
             .map(|m| {
@@ -1033,7 +1186,7 @@ impl LLMProvider for OllamaProvider {
                         Role::System => "system",
                         Role::User => "user",
                         Role::Assistant => "assistant",
-                        Role::Tool => "user",
+                        Role::Tool => "tool",
                     },
                     "content": m.content
                 })
@@ -1276,11 +1429,9 @@ impl ClaudeCliProvider {
 
         // System prompt (new sessions only)
         // Use --system-prompt to SET the prompt (not --append-system-prompt which appends)
-        if is_new_session {
-            if let Some(sys) = system_prompt {
-                args.push("--system-prompt".to_string());
-                args.push(sys.to_string());
-            }
+        if is_new_session && let Some(sys) = system_prompt {
+            args.push("--system-prompt".to_string());
+            args.push(sys.to_string());
         }
 
         // CLI session handling
@@ -1333,21 +1484,44 @@ fn normalize_claude_model(model: &str) -> String {
     .to_string()
 }
 
+/// Check if a message is the synthetic security block appended by `messages_for_api_call`.
+fn is_security_block(msg: &Message) -> bool {
+    msg.role == Role::User
+        && msg
+            .content
+            .contains(crate::security::HARDCODED_SECURITY_SUFFIX)
+}
+
 fn build_prompt_from_messages(messages: &[Message]) -> String {
-    // Get the last user message as the prompt
+    // Get the last *real* user message as the prompt, skipping the security block
     messages
         .iter()
         .rev()
-        .find(|m| m.role == Role::User)
+        .find(|m| m.role == Role::User && !is_security_block(m))
         .map(|m| m.content.clone())
         .unwrap_or_default()
 }
 
 fn extract_system_prompt(messages: &[Message]) -> Option<String> {
-    messages
+    let system = messages
         .iter()
         .find(|m| m.role == Role::System)
-        .map(|m| m.content.clone())
+        .map(|m| m.content.clone());
+
+    // For Claude CLI, fold the security block into the system prompt
+    // since the CLI only accepts a single prompt + system prompt
+    let security = messages
+        .iter()
+        .rev()
+        .find(|m| is_security_block(m))
+        .map(|m| m.content.clone());
+
+    match (system, security) {
+        (Some(sys), Some(sec)) => Some(format!("{}\n\n{}", sys, sec)),
+        (Some(sys), None) => Some(sys),
+        (None, Some(sec)) => Some(sec),
+        (None, None) => None,
+    }
 }
 
 /// Parse Claude CLI JSON output, returning (response_text, session_id)
@@ -1381,6 +1555,19 @@ fn parse_claude_cli_output(stdout: &str) -> Result<(String, Option<String>)> {
 
 #[async_trait]
 impl LLMProvider for ClaudeCliProvider {
+    fn reset_session(&self) {
+        if let Ok(mut cli_session) = self.cli_session_id.lock() {
+            *cli_session = None;
+        }
+        // Clear from session store on disk
+        if let Ok(mut store) = super::session_store::SessionStore::load() {
+            let _ = store.update(&self.session_key, &self.localgpt_session_id, |entry| {
+                entry.clear_cli_session_ids();
+            });
+        }
+        info!("Claude CLI session reset (next call will start fresh)");
+    }
+
     async fn chat(
         &self,
         messages: &[Message],
@@ -1534,8 +1721,8 @@ impl LLMProvider for ClaudeCliProvider {
                     match event_type {
                         // System init - show model info
                         "system" => {
-                            if json.get("subtype").and_then(|v| v.as_str()) == Some("init") {
-                                if let Some(model) = json.get("model").and_then(|v| v.as_str()) {
+                            if json.get("subtype").and_then(|v| v.as_str()) == Some("init")
+                                && let Some(model) = json.get("model").and_then(|v| v.as_str()) {
                                     let tools_count = json.get("tools")
                                         .and_then(|v| v.as_array())
                                         .map(|a| a.len())
@@ -1546,7 +1733,6 @@ impl LLMProvider for ClaudeCliProvider {
                                         tool_calls: None,
                                     });
                                 }
-                            }
                         }
 
                         // Assistant message with content (streaming updates)
@@ -1737,6 +1923,10 @@ impl LLMProvider for ClaudeCliProvider {
         Ok(Box::pin(stream))
     }
 }
+
+#[cfg(test)]
+#[path = "./test/unit/openaiprovider_tool_test.rs"]
+mod providers_test;
 
 #[cfg(test)]
 mod tests {

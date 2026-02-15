@@ -4,29 +4,30 @@ mod session;
 mod session_store;
 mod skills;
 mod system_prompt;
-mod tools;
+pub mod tools;
 
 pub use providers::{
     ImageAttachment, LLMProvider, LLMResponse, LLMResponseContent, Message, Role, StreamChunk,
     StreamEvent, StreamResult, ToolCall, ToolSchema, Usage,
 };
 pub use sanitize::{
-    wrap_external_content, wrap_memory_content, wrap_tool_output, MemorySource, SanitizeResult,
     EXTERNAL_CONTENT_END, EXTERNAL_CONTENT_START, MEMORY_CONTENT_END, MEMORY_CONTENT_START,
-    TOOL_OUTPUT_END, TOOL_OUTPUT_START,
+    MemorySource, SanitizeResult, TOOL_OUTPUT_END, TOOL_OUTPUT_START, detect_suspicious_patterns,
+    sanitize_tool_output, truncate_with_notice, wrap_external_content, wrap_memory_content,
+    wrap_tool_output,
 };
 pub use session::{
+    DEFAULT_AGENT_ID, Session, SessionInfo, SessionMessage, SessionSearchResult, SessionStatus,
     get_last_session_id, get_last_session_id_for_agent, get_sessions_dir_for_agent, get_state_dir,
-    list_sessions, list_sessions_for_agent, search_sessions, search_sessions_for_agent, Session,
-    SessionInfo, SessionMessage, SessionSearchResult, SessionStatus, DEFAULT_AGENT_ID,
+    list_sessions, list_sessions_for_agent, search_sessions, search_sessions_for_agent,
 };
 pub use session_store::{SessionEntry, SessionStore};
-pub use skills::{get_skills_summary, load_skills, parse_skill_command, Skill, SkillInvocation};
+pub use skills::{Skill, SkillInvocation, get_skills_summary, load_skills, parse_skill_command};
 pub use system_prompt::{
-    build_heartbeat_prompt, is_heartbeat_ok, is_silent_reply, HEARTBEAT_OK_TOKEN,
-    SILENT_REPLY_TOKEN,
+    HEARTBEAT_OK_TOKEN, SILENT_REPLY_TOKEN, build_heartbeat_prompt, is_heartbeat_ok,
+    is_silent_reply,
 };
-pub use tools::{extract_tool_detail, Tool, ToolResult};
+pub use tools::{Tool, ToolResult, extract_tool_detail};
 
 use anyhow::Result;
 use std::path::PathBuf;
@@ -39,6 +40,11 @@ use crate::memory::{MemoryChunk, MemoryManager};
 /// Soft threshold buffer before compaction (tokens)
 /// Memory flush runs when within this buffer of the hard limit
 const MEMORY_FLUSH_SOFT_THRESHOLD: usize = 4000;
+
+/// Token budget reserved for the per-turn security block (~80 suffix + ~1000 policy + margin).
+/// Subtracted from available context to prevent the security block from being dropped
+/// during context window management.
+const SECURITY_BLOCK_RESERVE: usize = 1200;
 
 /// Generate a URL-safe slug from text (first 3-5 words, lowercased, hyphenated)
 fn generate_slug(text: &str) -> String {
@@ -74,6 +80,8 @@ pub struct Agent {
     tools: Vec<Box<dyn Tool>>,
     /// Cumulative token usage for this session
     cumulative_usage: Usage,
+    /// Verified security policy content (None if missing, unsigned, or tampered)
+    verified_security_policy: Option<String>,
 }
 
 impl Agent {
@@ -88,6 +96,101 @@ impl Agent {
         let memory = Arc::new(memory);
         let tools = tools::create_default_tools(app_config, Some(Arc::clone(&memory)))?;
 
+        // Load and verify security policy
+        let workspace = app_config.workspace_path();
+        let data_dir = &app_config.paths.data_dir;
+        let state_dir = &app_config.paths.state_dir;
+
+        let verified_security_policy = if app_config.security.disable_policy {
+            debug!("Security policy loading disabled by config");
+            None
+        } else {
+            match crate::security::load_and_verify_policy(&workspace, data_dir) {
+                crate::security::PolicyVerification::Valid(content) => {
+                    let sha = crate::security::content_sha256(&content);
+                    let _ = crate::security::append_audit_entry(
+                        state_dir,
+                        crate::security::AuditAction::Verified,
+                        &sha,
+                        "session_start",
+                    );
+                    info!("Security policy verified and loaded");
+                    Some(content)
+                }
+                crate::security::PolicyVerification::TamperDetected => {
+                    let _ = crate::security::append_audit_entry(
+                        state_dir,
+                        crate::security::AuditAction::TamperDetected,
+                        "",
+                        "session_start",
+                    );
+                    if app_config.security.strict_policy {
+                        tracing::error!(
+                            "LocalGPT.md tamper detected — file was modified after signing"
+                        );
+                        anyhow::bail!(
+                            "Security policy tamper detected. \
+                             Re-sign with `localgpt md sign` or remove LocalGPT.md to continue."
+                        );
+                    }
+                    tracing::warn!("LocalGPT.md tamper detected. Using hardcoded security only.");
+                    None
+                }
+                crate::security::PolicyVerification::Unsigned => {
+                    let _ = crate::security::append_audit_entry(
+                        state_dir,
+                        crate::security::AuditAction::Unsigned,
+                        "",
+                        "session_start",
+                    );
+                    info!("LocalGPT.md not signed. Run `localgpt md sign` to activate.");
+                    None
+                }
+                crate::security::PolicyVerification::SuspiciousContent(warnings) => {
+                    let _ = crate::security::append_audit_entry_with_detail(
+                        state_dir,
+                        crate::security::AuditAction::SuspiciousContent,
+                        "",
+                        "session_start",
+                        Some(&warnings.join(", ")),
+                    );
+                    if app_config.security.strict_policy {
+                        tracing::error!("LocalGPT.md contains suspicious patterns: {:?}", warnings);
+                        anyhow::bail!(
+                            "Security policy rejected — suspicious content detected: {}. \
+                             Fix LocalGPT.md and re-sign with `localgpt md sign`.",
+                            warnings.join(", ")
+                        );
+                    }
+                    tracing::warn!(
+                        "LocalGPT.md contains suspicious patterns: {:?}. Skipping.",
+                        warnings
+                    );
+                    None
+                }
+                crate::security::PolicyVerification::Missing => {
+                    let _ = crate::security::append_audit_entry(
+                        state_dir,
+                        crate::security::AuditAction::Missing,
+                        "",
+                        "session_start",
+                    );
+                    debug!("No LocalGPT.md found, using hardcoded security only.");
+                    None
+                }
+                crate::security::PolicyVerification::ManifestCorrupted => {
+                    let _ = crate::security::append_audit_entry(
+                        state_dir,
+                        crate::security::AuditAction::ManifestCorrupted,
+                        "",
+                        "session_start",
+                    );
+                    tracing::warn!("Security manifest corrupted. Using hardcoded security only.");
+                    None
+                }
+            }
+        };
+
         Ok(Self {
             config,
             app_config: app_config.clone(),
@@ -96,6 +199,45 @@ impl Agent {
             memory,
             tools,
             cumulative_usage: Usage::default(),
+            verified_security_policy,
+        })
+    }
+
+    /// Create an agent with custom pre-built tools (e.g., for Gen mode).
+    pub fn new_with_tools(
+        app_config: Config,
+        _agent_id: &str,
+        memory: Arc<MemoryManager>,
+        tools: Vec<Box<dyn Tool>>,
+    ) -> Result<Self> {
+        let agent_config = AgentConfig {
+            model: app_config.agent.default_model.clone(),
+            context_window: app_config.agent.context_window,
+            reserve_tokens: app_config.agent.reserve_tokens,
+        };
+        let provider = providers::create_provider(&agent_config.model, &app_config)?;
+
+        // Load security policy
+        let workspace = app_config.workspace_path();
+        let data_dir = &app_config.paths.data_dir;
+        let verified_security_policy = if app_config.security.disable_policy {
+            None
+        } else {
+            match crate::security::load_and_verify_policy(&workspace, data_dir) {
+                crate::security::PolicyVerification::Valid(content) => Some(content),
+                _ => None,
+            }
+        };
+
+        Ok(Self {
+            config: agent_config,
+            app_config,
+            provider,
+            session: Session::new(),
+            memory,
+            tools,
+            cumulative_usage: Usage::default(),
+            verified_security_policy,
         })
     }
 
@@ -187,8 +329,44 @@ impl Agent {
         }
     }
 
+    /// Build the message array for an LLM API call, with the security
+    /// block injected as a trailing user message on every call.
+    ///
+    /// This ensures the security suffix always occupies the recency position
+    /// (last content before generation), regardless of conversation length.
+    /// The security block is synthetic — it is not persisted in session
+    /// history and not included in compaction/summarization.
+    fn messages_for_api_call(&self) -> Vec<Message> {
+        let mut messages = self.session.messages_for_llm();
+
+        let include_suffix = !self.app_config.security.disable_suffix;
+        let policy = if self.app_config.security.disable_policy {
+            None
+        } else {
+            self.verified_security_policy.as_deref()
+        };
+
+        let security_block = crate::security::build_ending_security_block(policy, include_suffix);
+
+        // Only append if the block has content
+        if !security_block.is_empty() {
+            messages.push(Message {
+                role: Role::User,
+                content: security_block,
+                tool_calls: None,
+                tool_call_id: None,
+                images: Vec::new(),
+            });
+        }
+
+        messages
+    }
+
     pub async fn new_session(&mut self) -> Result<()> {
         self.session = Session::new();
+
+        // Reset provider session state (e.g., clear Claude CLI session ID)
+        self.provider.reset_session();
 
         // Load skills from workspace
         let workspace_skills = skills::load_skills(self.memory.workspace()).unwrap_or_default();
@@ -257,8 +435,8 @@ impl Agent {
             self.compact_session().await?;
         }
 
-        // Build messages for LLM
-        let messages = self.session.messages_for_llm();
+        // Build messages for LLM (with per-turn security block)
+        let messages = self.messages_for_api_call();
 
         // Get available tools
         let tool_schemas: Vec<ToolSchema> = self.tools.iter().map(|t| t.schema()).collect();
@@ -301,9 +479,13 @@ impl Agent {
                     );
 
                     let result = self.execute_tool(call).await;
+                    let output = match result {
+                        Ok((content, _warnings)) => content,
+                        Err(e) => format!("Error: {}", e),
+                    };
                     results.push(ToolResult {
                         call_id: call.id.clone(),
-                        output: result.unwrap_or_else(|e| format!("Error: {}", e)),
+                        output,
                     });
                 }
 
@@ -327,8 +509,8 @@ impl Agent {
                     });
                 }
 
-                // Continue conversation with tool results
-                let messages = self.session.messages_for_llm();
+                // Continue conversation with tool results (with per-turn security block)
+                let messages = self.messages_for_api_call();
                 let tool_schemas: Vec<ToolSchema> = self.tools.iter().map(|t| t.schema()).collect();
                 let next_response = self
                     .provider
@@ -341,7 +523,7 @@ impl Agent {
         }
     }
 
-    async fn execute_tool(&self, call: &ToolCall) -> Result<String> {
+    async fn execute_tool(&self, call: &ToolCall) -> Result<(String, Vec<String>)> {
         for tool in &self.tools {
             if tool.name() == call.name {
                 let raw_output = tool.execute(&call.arguments).await?;
@@ -364,10 +546,10 @@ impl Agent {
                         );
                     }
 
-                    return Ok(result.content);
+                    return Ok((result.content, result.warnings));
                 }
 
-                return Ok(raw_output);
+                return Ok((raw_output, Vec::new()));
             }
         }
         anyhow::bail!("Unknown tool: {}", call.name)
@@ -385,150 +567,152 @@ impl Agent {
         }
 
         // Load IDENTITY.md first (OpenClaw-compatible: agent identity context)
-        if let Ok(identity_content) = self.memory.read_identity_file() {
-            if !identity_content.is_empty() {
-                if use_delimiters {
-                    context.push_str(&sanitize::wrap_memory_content(
-                        "IDENTITY.md",
-                        &identity_content,
-                        sanitize::MemorySource::Identity,
-                    ));
-                } else {
-                    context.push_str("# Identity (IDENTITY.md)\n\n");
-                    context.push_str(&identity_content);
-                }
-                context.push_str("\n\n---\n\n");
+        if let Ok(identity_content) = self.memory.read_identity_file()
+            && !identity_content.is_empty()
+        {
+            if use_delimiters {
+                context.push_str(&sanitize::wrap_memory_content(
+                    "IDENTITY.md",
+                    &identity_content,
+                    sanitize::MemorySource::Identity,
+                ));
+            } else {
+                context.push_str("# Identity (IDENTITY.md)\n\n");
+                context.push_str(&identity_content);
             }
+            context.push_str("\n\n---\n\n");
         }
 
         // Load USER.md (OpenClaw-compatible: user info)
-        if let Ok(user_content) = self.memory.read_user_file() {
-            if !user_content.is_empty() {
-                if use_delimiters {
-                    context.push_str(&sanitize::wrap_memory_content(
-                        "USER.md",
-                        &user_content,
-                        sanitize::MemorySource::User,
-                    ));
-                } else {
-                    context.push_str("# User Info (USER.md)\n\n");
-                    context.push_str(&user_content);
-                }
-                context.push_str("\n\n---\n\n");
+        if let Ok(user_content) = self.memory.read_user_file()
+            && !user_content.is_empty()
+        {
+            if use_delimiters {
+                context.push_str(&sanitize::wrap_memory_content(
+                    "USER.md",
+                    &user_content,
+                    sanitize::MemorySource::User,
+                ));
+            } else {
+                context.push_str("# User Info (USER.md)\n\n");
+                context.push_str(&user_content);
             }
+            context.push_str("\n\n---\n\n");
         }
 
         // Load SOUL.md (persona/tone) - this defines who the agent is
-        if let Ok(soul_content) = self.memory.read_soul_file() {
-            if !soul_content.is_empty() {
-                if use_delimiters {
-                    context.push_str(&sanitize::wrap_memory_content(
-                        "SOUL.md",
-                        &soul_content,
-                        sanitize::MemorySource::Soul,
-                    ));
-                } else {
-                    context.push_str(&soul_content);
-                }
-                context.push_str("\n\n---\n\n");
+        if let Ok(soul_content) = self.memory.read_soul_file()
+            && !soul_content.is_empty()
+        {
+            if use_delimiters {
+                context.push_str(&sanitize::wrap_memory_content(
+                    "SOUL.md",
+                    &soul_content,
+                    sanitize::MemorySource::Soul,
+                ));
+            } else {
+                context.push_str(&soul_content);
             }
+            context.push_str("\n\n---\n\n");
         }
 
         // Load AGENTS.md (OpenClaw-compatible: list of connected agents)
-        if let Ok(agents_content) = self.memory.read_agents_file() {
-            if !agents_content.is_empty() {
-                if use_delimiters {
-                    context.push_str(&sanitize::wrap_memory_content(
-                        "AGENTS.md",
-                        &agents_content,
-                        sanitize::MemorySource::Agents,
-                    ));
-                } else {
-                    context.push_str("# Available Agents (AGENTS.md)\n\n");
-                    context.push_str(&agents_content);
-                }
-                context.push_str("\n\n---\n\n");
+        if let Ok(agents_content) = self.memory.read_agents_file()
+            && !agents_content.is_empty()
+        {
+            if use_delimiters {
+                context.push_str(&sanitize::wrap_memory_content(
+                    "AGENTS.md",
+                    &agents_content,
+                    sanitize::MemorySource::Agents,
+                ));
+            } else {
+                context.push_str("# Available Agents (AGENTS.md)\n\n");
+                context.push_str(&agents_content);
             }
+            context.push_str("\n\n---\n\n");
         }
 
         // Load TOOLS.md (OpenClaw-compatible: local tool notes)
-        if let Ok(tools_content) = self.memory.read_tools_file() {
-            if !tools_content.is_empty() {
-                if use_delimiters {
-                    context.push_str(&sanitize::wrap_memory_content(
-                        "TOOLS.md",
-                        &tools_content,
-                        sanitize::MemorySource::Tools,
-                    ));
-                } else {
-                    context.push_str("# Tool Notes (TOOLS.md)\n\n");
-                    context.push_str(&tools_content);
-                }
-                context.push_str("\n\n---\n\n");
+        if let Ok(tools_content) = self.memory.read_tools_file()
+            && !tools_content.is_empty()
+        {
+            if use_delimiters {
+                context.push_str(&sanitize::wrap_memory_content(
+                    "TOOLS.md",
+                    &tools_content,
+                    sanitize::MemorySource::Tools,
+                ));
+            } else {
+                context.push_str("# Tool Notes (TOOLS.md)\n\n");
+                context.push_str(&tools_content);
             }
+            context.push_str("\n\n---\n\n");
         }
 
         // Load MEMORY.md if it exists
-        if let Ok(memory_content) = self.memory.read_memory_file() {
-            if !memory_content.is_empty() {
-                if use_delimiters {
-                    context.push_str(&sanitize::wrap_memory_content(
-                        "MEMORY.md",
-                        &memory_content,
-                        sanitize::MemorySource::Memory,
-                    ));
-                } else {
-                    context.push_str("# Long-term Memory (MEMORY.md)\n\n");
-                    context.push_str(&memory_content);
-                }
-                context.push_str("\n\n");
+        if let Ok(memory_content) = self.memory.read_memory_file()
+            && !memory_content.is_empty()
+        {
+            if use_delimiters {
+                context.push_str(&sanitize::wrap_memory_content(
+                    "MEMORY.md",
+                    &memory_content,
+                    sanitize::MemorySource::Memory,
+                ));
+            } else {
+                context.push_str("# Long-term Memory (MEMORY.md)\n\n");
+                context.push_str(&memory_content);
             }
+            context.push_str("\n\n");
         }
 
         // Load today's and yesterday's daily logs
-        if let Ok(recent_logs) = self.memory.read_recent_daily_logs(2) {
-            if !recent_logs.is_empty() {
-                if use_delimiters {
-                    context.push_str(&sanitize::wrap_memory_content(
-                        "memory/*.md",
-                        &recent_logs,
-                        sanitize::MemorySource::DailyLog,
-                    ));
-                } else {
-                    context.push_str("# Recent Daily Logs\n\n");
-                    context.push_str(&recent_logs);
-                }
-                context.push_str("\n\n");
+        if let Ok(recent_logs) = self.memory.read_recent_daily_logs(2)
+            && !recent_logs.is_empty()
+        {
+            if use_delimiters {
+                context.push_str(&sanitize::wrap_memory_content(
+                    "memory/*.md",
+                    &recent_logs,
+                    sanitize::MemorySource::DailyLog,
+                ));
+            } else {
+                context.push_str("# Recent Daily Logs\n\n");
+                context.push_str(&recent_logs);
             }
+            context.push_str("\n\n");
         }
 
         // Load HEARTBEAT.md if it exists
-        if let Ok(heartbeat) = self.memory.read_heartbeat_file() {
-            if !heartbeat.is_empty() {
-                if use_delimiters {
-                    context.push_str(&sanitize::wrap_memory_content(
-                        "HEARTBEAT.md",
-                        &heartbeat,
-                        sanitize::MemorySource::Heartbeat,
-                    ));
-                } else {
-                    context.push_str("# Pending Tasks (HEARTBEAT.md)\n\n");
-                    context.push_str(&heartbeat);
-                }
-                context.push('\n');
+        if let Ok(heartbeat) = self.memory.read_heartbeat_file()
+            && !heartbeat.is_empty()
+        {
+            if use_delimiters {
+                context.push_str(&sanitize::wrap_memory_content(
+                    "HEARTBEAT.md",
+                    &heartbeat,
+                    sanitize::MemorySource::Heartbeat,
+                ));
+            } else {
+                context.push_str("# Pending Tasks (HEARTBEAT.md)\n\n");
+                context.push_str(&heartbeat);
             }
+            context.push('\n');
         }
 
         Ok(context)
     }
 
     fn should_compact(&self) -> bool {
-        self.session.token_count() > (self.config.context_window - self.config.reserve_tokens)
+        self.session.token_count()
+            > (self.config.context_window - self.config.reserve_tokens - SECURITY_BLOCK_RESERVE)
     }
 
     /// Check if we should run pre-compaction memory flush (soft threshold)
     fn should_memory_flush(&self) -> bool {
-        let hard_limit = self.config.context_window - self.config.reserve_tokens;
+        let hard_limit =
+            self.config.context_window - self.config.reserve_tokens - SECURITY_BLOCK_RESERVE;
         let soft_limit = hard_limit.saturating_sub(MEMORY_FLUSH_SOFT_THRESHOLD);
 
         self.session.token_count() > soft_limit && self.session.should_memory_flush()
@@ -578,7 +762,7 @@ impl Agent {
 
         // Get tool schemas so agent can write files
         let tool_schemas: Vec<ToolSchema> = self.tools.iter().map(|t| t.schema()).collect();
-        let messages = self.session.messages_for_llm();
+        let messages = self.messages_for_api_call();
 
         let response = self.provider.chat(&messages, Some(&tool_schemas)).await?;
 
@@ -689,6 +873,7 @@ impl Agent {
 
     pub fn clear_session(&mut self) {
         self.session = Session::new();
+        self.provider.reset_session();
     }
 
     pub async fn search_memory(&self, query: &str) -> Result<Vec<MemoryChunk>> {
@@ -753,8 +938,8 @@ impl Agent {
             self.compact_session().await?;
         }
 
-        // Build messages for LLM
-        let messages = self.session.messages_for_llm();
+        // Build messages for LLM (with per-turn security block)
+        let messages = self.messages_for_api_call();
 
         // Get tool schemas so the model knows the correct tool call format
         let tool_schemas: Vec<ToolSchema> = self.tools.iter().map(|t| t.schema()).collect();
@@ -777,12 +962,12 @@ impl Agent {
     }
 
     /// Execute tool calls that were accumulated during streaming
-    /// Returns the final response after tool execution
+    /// Returns (final_response, Vec<(tool_name, warnings)>)
     pub async fn execute_streaming_tool_calls(
         &mut self,
         text_response: &str,
         tool_calls: Vec<ToolCall>,
-    ) -> Result<String> {
+    ) -> Result<(String, Vec<(String, Vec<String>)>)> {
         // Add assistant message with tool calls
         self.session.add_message(Message {
             role: Role::Assistant,
@@ -794,6 +979,7 @@ impl Agent {
 
         // Execute each tool and collect results
         let mut results = Vec::new();
+        let mut all_warnings: Vec<(String, Vec<String>)> = Vec::new();
         for call in &tool_calls {
             debug!(
                 "Executing tool: {} with args: {}",
@@ -801,9 +987,16 @@ impl Agent {
             );
 
             let result = self.execute_tool(call).await;
+            let (output, warnings) = match result {
+                Ok((content, warnings)) => (content, warnings),
+                Err(e) => (format!("Error: {}", e), Vec::new()),
+            };
+            if !warnings.is_empty() {
+                all_warnings.push((call.name.clone(), warnings));
+            }
             results.push(ToolResult {
                 call_id: call.id.clone(),
-                output: result.unwrap_or_else(|e| format!("Error: {}", e)),
+                output,
             });
         }
 
@@ -818,8 +1011,8 @@ impl Agent {
             });
         }
 
-        // Get follow-up response from LLM
-        let messages = self.session.messages_for_llm();
+        // Get follow-up response from LLM (with per-turn security block)
+        let messages = self.messages_for_api_call();
         let tool_schemas: Vec<ToolSchema> = self.tools.iter().map(|t| t.schema()).collect();
         let response = self
             .provider
@@ -838,7 +1031,7 @@ impl Agent {
             images: Vec::new(),
         });
 
-        Ok(final_response)
+        Ok((final_response, all_warnings))
     }
 
     /// Get a reference to the LLM provider for streaming
@@ -846,9 +1039,9 @@ impl Agent {
         &*self.provider
     }
 
-    /// Get messages for the LLM (for streaming)
+    /// Get messages for the LLM (for streaming), with security block.
     pub fn session_messages(&self) -> Vec<Message> {
-        self.session.messages_for_llm()
+        self.messages_for_api_call()
     }
 
     /// Get raw session messages with metadata (for API responses)
@@ -923,8 +1116,8 @@ impl Agent {
                 // Get tool schemas
                 let tool_schemas: Vec<ToolSchema> = self.tools.iter().map(|t| t.schema()).collect();
 
-                // Build messages for LLM
-                let messages = self.session.messages_for_llm();
+                // Build messages for LLM (with per-turn security block)
+                let messages = self.messages_for_api_call();
 
                 // Try streaming first (without tools since most providers don't support tool streaming)
                 // Then check for tool calls in the response
@@ -965,12 +1158,16 @@ impl Agent {
 
                             // Execute tool
                             let result = self.execute_tool(call).await;
-                            let output = result.unwrap_or_else(|e| format!("Error: {}", e));
+                            let (output, warnings) = match result {
+                                Ok((content, warnings)) => (content, warnings),
+                                Err(e) => (format!("Error: {}", e), Vec::new()),
+                            };
 
                             yield Ok(StreamEvent::ToolCallEnd {
                                 name: call.name.clone(),
                                 id: call.id.clone(),
                                 output: output.clone(),
+                                warnings,
                             });
 
                             // Add tool result to session

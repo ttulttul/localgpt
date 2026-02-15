@@ -10,7 +10,7 @@ pub struct DesktopArgs {
 }
 
 pub fn run(_args: DesktopArgs, agent_id: &str) -> Result<()> {
-    use localgpt::desktop::DesktopApp;
+    use crate::desktop::DesktopApp;
 
     let native_options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()

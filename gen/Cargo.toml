@@ -1,0 +1,14 @@
+[package]
+name = "localgpt-gen"
+version = "0.2.0"
+edition = "2024"
+description = "LocalGPT Gen — AI-driven 3D scene generation"
+license = "Apache-2.0"
+publish = false
+
+[dependencies]
+localgpt = { path = "..", features = ["gen"] }
+tokio = { version = "1.49", features = ["full"] }
+anyhow = "1.0"
+clap = { version = "4.5", features = ["derive"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

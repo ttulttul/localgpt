@@ -3,7 +3,7 @@
 use eframe::egui;
 
 use super::state::{Panel, UiState};
-use super::views::{chat::show_toolbar, ChatView, SessionsView, StatusView};
+use super::views::{ChatView, SessionsView, StatusView, chat::show_toolbar};
 use super::worker::WorkerHandle;
 
 /// The main desktop application
@@ -45,11 +45,11 @@ impl DesktopApp {
         );
 
         // Rounded corners
-        style.visuals.window_rounding = egui::Rounding::same(8.0);
-        style.visuals.widgets.noninteractive.rounding = egui::Rounding::same(4.0);
-        style.visuals.widgets.inactive.rounding = egui::Rounding::same(4.0);
-        style.visuals.widgets.hovered.rounding = egui::Rounding::same(4.0);
-        style.visuals.widgets.active.rounding = egui::Rounding::same(4.0);
+        style.visuals.window_corner_radius = egui::CornerRadius::same(8);
+        style.visuals.widgets.noninteractive.corner_radius = egui::CornerRadius::same(4);
+        style.visuals.widgets.inactive.corner_radius = egui::CornerRadius::same(4);
+        style.visuals.widgets.hovered.corner_radius = egui::CornerRadius::same(4);
+        style.visuals.widgets.active.corner_radius = egui::CornerRadius::same(4);
 
         ctx.set_style(style);
     }
@@ -86,10 +86,10 @@ impl eframe::App for DesktopApp {
             };
 
             // Send any UI messages to worker
-            if let Some(msg) = msg {
-                if let Err(e) = self.worker.send(msg) {
-                    self.state.error = Some(format!("Failed to send to worker: {}", e));
-                }
+            if let Some(msg) = msg
+                && let Err(e) = self.worker.send(msg)
+            {
+                self.state.error = Some(format!("Failed to send to worker: {}", e));
             }
         });
     }

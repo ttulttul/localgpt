@@ -1,18 +1,18 @@
 use anyhow::Result;
 use clap::Args;
 use futures::StreamExt;
-use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
+use rustyline::error::ReadlineError;
 use std::io::{self, Write};
 
-use localgpt::agent::{
-    extract_tool_detail, get_last_session_id_for_agent, get_skills_summary,
-    list_sessions_for_agent, load_skills, parse_skill_command, search_sessions_for_agent, Agent,
-    AgentConfig, ImageAttachment, Skill,
+use crate::agent::{
+    Agent, AgentConfig, ImageAttachment, Skill, extract_tool_detail, get_last_session_id_for_agent,
+    get_skills_summary, list_sessions_for_agent, load_skills, parse_skill_command,
+    search_sessions_for_agent,
 };
-use localgpt::concurrency::WorkspaceLock;
-use localgpt::config::Config;
-use localgpt::memory::MemoryManager;
+use crate::concurrency::WorkspaceLock;
+use crate::config::Config;
+use crate::memory::MemoryManager;
 
 /// Adjust a byte index to the nearest valid UTF-8 char boundary (searching forward).
 fn floor_char_boundary(s: &str, index: usize) -> usize {
@@ -61,17 +61,17 @@ fn extract_snippet(content: &str, query: &str, max_len: usize) -> String {
         let mut snippet_end = end;
 
         // Find word boundary at start
-        if start > 0 {
-            if let Some(space_pos) = normalized[start..].find(' ') {
-                snippet_start = start + space_pos + 1;
-            }
+        if start > 0
+            && let Some(space_pos) = normalized[start..].find(' ')
+        {
+            snippet_start = start + space_pos + 1;
         }
 
         // Find word boundary at end
-        if end < normalized.len() {
-            if let Some(space_pos) = normalized[..end].rfind(' ') {
-                snippet_end = space_pos;
-            }
+        if end < normalized.len()
+            && let Some(space_pos) = normalized[..end].rfind(' ')
+        {
+            snippet_end = space_pos;
         }
 
         let snippet = &normalized[snippet_start..snippet_end];
@@ -255,7 +255,7 @@ pub async fn run(args: ChatArgs, agent_id: &str) -> Result<()> {
                     // Read as binary and encode as base64
                     match std::fs::read(&expanded) {
                         Ok(bytes) => {
-                            use base64::{engine::general_purpose::STANDARD, Engine as _};
+                            use base64::{Engine as _, engine::general_purpose::STANDARD};
                             let data = STANDARD.encode(&bytes);
                             let media_type = match ext.as_deref() {
                                 Some("png") => "image/png",
@@ -272,7 +272,9 @@ pub async fn run(args: ChatArgs, agent_id: &str) -> Result<()> {
                                 data: ImageAttachment { data, media_type },
                             });
                             println!("Attached image: {} ({} bytes)", filename, size);
-                            println!("Type your message to send with attachment(s), or /attachments to list.\n");
+                            println!(
+                                "Type your message to send with attachment(s), or /attachments to list.\n"
+                            );
                         }
                         Err(e) => {
                             eprintln!("Failed to read image file: {}", e);
@@ -288,7 +290,9 @@ pub async fn run(args: ChatArgs, agent_id: &str) -> Result<()> {
                                 content,
                             });
                             println!("Attached: {} ({} bytes)", filename, size);
-                            println!("Type your message to send with attachment(s), or /attachments to list.\n");
+                            println!(
+                                "Type your message to send with attachment(s), or /attachments to list.\n"
+                            );
                         }
                         Err(e) => {
                             eprintln!("Failed to read file: {}", e);
@@ -458,7 +462,15 @@ pub async fn run(args: ChatArgs, agent_id: &str) -> Result<()> {
                             .execute_streaming_tool_calls(&full_response, approved_calls)
                             .await
                         {
-                            Ok(follow_up) => {
+                            Ok((follow_up, warnings)) => {
+                                for (tool_name, tool_warnings) in &warnings {
+                                    for w in tool_warnings {
+                                        eprintln!(
+                                            "  \u{26a0} Suspicious content in {} output: {}",
+                                            tool_name, w
+                                        );
+                                    }
+                                }
                                 print!("{}", follow_up);
                                 stdout.flush()?;
                             }
@@ -511,26 +523,10 @@ async fn handle_command(
         "/quit" | "/exit" | "/q" => CommandResult::Quit,
 
         "/help" | "/h" | "/?" => {
-            println!("\nCommands:");
-            println!("  /help, /h, /?     - Show this help");
-            println!("  /quit, /exit, /q  - Exit chat");
-            println!("  /new              - Start a fresh session (reloads memory context)");
-            println!("  /skills           - List available skills");
-            println!("  /sessions         - List available sessions");
-            println!("  /search <query>   - Search across all sessions");
-            println!("  /resume <id>      - Resume a specific session");
-            println!("  /model [name]     - Show or switch model (e.g., /model gpt-4o)");
-            println!("  /models           - List available model prefixes");
-            println!("  /context          - Show context window usage");
-            println!("  /export [file]    - Export session as markdown");
-            println!("  /attach <file>    - Attach file to next message");
-            println!("  /attachments      - List pending attachments");
-            println!("  /compact          - Compact session history");
-            println!("  /clear            - Clear session history (keeps context)");
-            println!("  /memory <query>   - Search memory");
-            println!("  /reindex          - Rebuild memory index");
-            println!("  /save             - Save current session");
-            println!("  /status           - Show session status and API token usage");
+            println!(
+                "\n{}",
+                crate::commands::format_help_text(crate::commands::Interface::Cli)
+            );
 
             // Show skill commands if any
             let invocable: Vec<&Skill> = skills.iter().filter(|s| s.can_invoke()).collect();

@@ -32,10 +32,10 @@ impl Drop for WorkspaceLockGuard {
 impl WorkspaceLock {
     /// Create a new WorkspaceLock.
     ///
-    /// The lock file is placed at `~/.localgpt/workspace.lock`.
+    /// The lock file is placed in the runtime directory (or state directory fallback).
     pub fn new() -> Result<Self> {
-        let state_dir = crate::agent::get_state_dir()?;
-        let path = state_dir.join("workspace.lock");
+        let paths = crate::paths::Paths::resolve()?;
+        let path = paths.workspace_lock();
         // Ensure parent directory exists
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;

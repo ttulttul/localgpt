@@ -10,7 +10,7 @@ use std::fs;
 use std::path::PathBuf;
 use tracing::debug;
 
-use super::session::{get_sessions_dir_for_agent, DEFAULT_AGENT_ID};
+use super::session::{DEFAULT_AGENT_ID, get_sessions_dir_for_agent};
 
 /// Session entry in sessions.json (matches OpenClaw's SessionEntry)
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -69,19 +69,18 @@ impl SessionEntry {
     /// Get CLI session ID for a provider
     pub fn get_cli_session_id(&self, provider: &str) -> Option<&str> {
         // Try the map first
-        if let Some(id) = self.cli_session_ids.get(provider) {
-            if !id.is_empty() {
-                return Some(id.as_str());
-            }
+        if let Some(id) = self.cli_session_ids.get(provider)
+            && !id.is_empty()
+        {
+            return Some(id.as_str());
         }
 
         // Fallback to legacy field for claude-cli
-        if provider == "claude-cli" {
-            if let Some(ref id) = self.claude_cli_session_id {
-                if !id.is_empty() {
-                    return Some(id.as_str());
-                }
-            }
+        if provider == "claude-cli"
+            && let Some(ref id) = self.claude_cli_session_id
+            && !id.is_empty()
+        {
+            return Some(id.as_str());
         }
 
         None
@@ -100,11 +99,18 @@ impl SessionEntry {
         self.updated_at = chrono::Utc::now().timestamp_millis() as u64;
     }
 
+    /// Clear CLI session IDs (called on `/new` to force a fresh CLI session)
+    pub fn clear_cli_session_ids(&mut self) {
+        self.cli_session_ids.clear();
+        self.claude_cli_session_id = None;
+        self.updated_at = chrono::Utc::now().timestamp_millis() as u64;
+    }
+
     /// Check if a heartbeat would be a duplicate (same text within 24 hours)
     pub fn is_duplicate_heartbeat(&self, text: &str) -> bool {
         const DEDUP_WINDOW_MS: u64 = 24 * 60 * 60 * 1000; // 24 hours
 
-        if let (Some(ref last_text), Some(last_sent_at)) =
+        if let (Some(last_text), Some(last_sent_at)) =
             (&self.last_heartbeat_text, self.last_heartbeat_sent_at)
         {
             let now = chrono::Utc::now().timestamp_millis() as u64;

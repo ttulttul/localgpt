@@ -8,12 +8,12 @@ use std::time::{Duration, Instant};
 use tokio::time::sleep;
 use tracing::{debug, info, warn};
 
-use super::events::{emit_heartbeat_event, now_ms, HeartbeatEvent, HeartbeatStatus};
+use super::events::{HeartbeatEvent, HeartbeatStatus, emit_heartbeat_event, now_ms};
 use crate::agent::{
-    build_heartbeat_prompt, is_heartbeat_ok, Agent, AgentConfig, SessionStore, HEARTBEAT_OK_TOKEN,
+    Agent, AgentConfig, HEARTBEAT_OK_TOKEN, SessionStore, build_heartbeat_prompt, is_heartbeat_ok,
 };
 use crate::concurrency::{TurnGate, WorkspaceLock};
-use crate::config::{parse_duration, parse_time, Config};
+use crate::config::{Config, parse_duration, parse_time};
 use crate::memory::MemoryManager;
 
 pub struct HeartbeatRunner {
@@ -189,11 +189,11 @@ impl HeartbeatRunner {
     /// Internal heartbeat execution (returns response and status)
     async fn run_once_internal(&self) -> Result<(String, HeartbeatStatus)> {
         // Skip if an in-process agent turn is already in flight
-        if let Some(ref gate) = self.turn_gate {
-            if gate.is_busy() {
-                debug!("Skipping heartbeat: agent turn in flight (TurnGate busy)");
-                return Ok((HEARTBEAT_OK_TOKEN.to_string(), HeartbeatStatus::Skipped));
-            }
+        if let Some(ref gate) = self.turn_gate
+            && gate.is_busy()
+        {
+            debug!("Skipping heartbeat: agent turn in flight (TurnGate busy)");
+            return Ok((HEARTBEAT_OK_TOKEN.to_string(), HeartbeatStatus::Skipped));
         }
 
         // Try to acquire the cross-process workspace lock (non-blocking)
@@ -260,14 +260,14 @@ impl HeartbeatRunner {
 
         // Load session store to check for duplicates
         if let Ok(mut store) = SessionStore::load_for_agent(&self.agent_id) {
-            if let Some(entry) = store.get(session_key) {
-                if entry.is_duplicate_heartbeat(&response) {
-                    debug!(
-                        "Skipping duplicate heartbeat (same text within 24h): {}",
-                        &response[..response.len().min(100)]
-                    );
-                    return Ok((response, HeartbeatStatus::Skipped));
-                }
+            if let Some(entry) = store.get(session_key)
+                && entry.is_duplicate_heartbeat(&response)
+            {
+                debug!(
+                    "Skipping duplicate heartbeat (same text within 24h): {}",
+                    &response[..response.len().min(100)]
+                );
+                return Ok((response, HeartbeatStatus::Skipped));
             }
 
             // Record the heartbeat (re-read from disk to avoid clobbering)

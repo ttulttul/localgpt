@@ -1,6 +1,6 @@
 use anyhow::Result;
 use async_trait::async_trait;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -9,6 +9,7 @@ use tracing::debug;
 use super::providers::ToolSchema;
 use crate::config::Config;
 use crate::memory::MemoryManager;
+use crate::sandbox::{self, SandboxPolicy};
 
 #[derive(Debug, Clone)]
 pub struct ToolResult {
@@ -28,6 +29,29 @@ pub fn create_default_tools(
     memory: Option<Arc<MemoryManager>>,
 ) -> Result<Vec<Box<dyn Tool>>> {
     let workspace = config.workspace_path();
+    let state_dir = config.paths.state_dir.clone();
+
+    // Build sandbox policy if enabled
+    let sandbox_policy = if config.sandbox.enabled {
+        let caps = sandbox::detect_capabilities();
+        let effective = caps.effective_level(&config.sandbox.level);
+        if effective > sandbox::SandboxLevel::None {
+            Some(sandbox::build_policy(
+                &config.sandbox,
+                &workspace,
+                effective,
+            ))
+        } else {
+            tracing::warn!(
+                "Sandbox enabled but no kernel support detected (level: {:?}). \
+                 Commands will run without sandbox enforcement.",
+                caps.level
+            );
+            None
+        }
+    } else {
+        None
+    };
 
     // Use indexed memory search if MemoryManager is provided, otherwise fallback to grep-based
     let memory_search_tool: Box<dyn Tool> = if let Some(ref mem) = memory {
@@ -37,10 +61,17 @@ pub fn create_default_tools(
     };
 
     Ok(vec![
-        Box::new(BashTool::new(config.tools.bash_timeout_ms)),
-        Box::new(ReadFileTool::new()),
-        Box::new(WriteFileTool::new()),
-        Box::new(EditFileTool::new()),
+        Box::new(BashTool::new(
+            config.tools.bash_timeout_ms,
+            state_dir.clone(),
+            sandbox_policy.clone(),
+        )),
+        Box::new(ReadFileTool::new(sandbox_policy.clone())),
+        Box::new(WriteFileTool::new(
+            state_dir.clone(),
+            sandbox_policy.clone(),
+        )),
+        Box::new(EditFileTool::new(state_dir, sandbox_policy)),
         memory_search_tool,
         Box::new(MemoryGetTool::new(workspace)),
         Box::new(WebFetchTool::new(config.tools.web_fetch_max_bytes)),
@@ -50,11 +81,21 @@ pub fn create_default_tools(
 // Bash Tool
 pub struct BashTool {
     default_timeout_ms: u64,
+    state_dir: PathBuf,
+    sandbox_policy: Option<SandboxPolicy>,
 }
 
 impl BashTool {
-    pub fn new(default_timeout_ms: u64) -> Self {
-        Self { default_timeout_ms }
+    pub fn new(
+        default_timeout_ms: u64,
+        state_dir: PathBuf,
+        sandbox_policy: Option<SandboxPolicy>,
+    ) -> Self {
+        Self {
+            default_timeout_ms,
+            state_dir,
+            sandbox_policy,
+        }
     }
 }
 
@@ -95,12 +136,41 @@ impl Tool for BashTool {
             .as_u64()
             .unwrap_or(self.default_timeout_ms);
 
+        // Best-effort protected file check for bash commands
+        let suspicious = crate::security::check_bash_command(command);
+        if !suspicious.is_empty() {
+            let detail = format!(
+                "Bash command references protected files: {:?} (cmd: {})",
+                suspicious,
+                &command[..command.len().min(200)]
+            );
+            let _ = crate::security::append_audit_entry_with_detail(
+                &self.state_dir,
+                crate::security::AuditAction::WriteBlocked,
+                "",
+                "tool:bash",
+                Some(&detail),
+            );
+            tracing::warn!("Bash command may modify protected files: {:?}", suspicious);
+        }
+
         debug!(
             "Executing bash command (timeout: {}ms): {}",
             timeout_ms, command
         );
 
-        // Run command with timeout
+        // Use sandbox if policy is configured
+        if let Some(ref policy) = self.sandbox_policy {
+            let (output, exit_code) = sandbox::run_sandboxed(command, policy, timeout_ms).await?;
+
+            if output.is_empty() {
+                return Ok(format!("Command completed with exit code: {}", exit_code));
+            }
+
+            return Ok(output);
+        }
+
+        // Fallback: run command directly without sandbox
         let timeout_duration = std::time::Duration::from_millis(timeout_ms);
         let output = tokio::time::timeout(
             timeout_duration,
@@ -140,11 +210,13 @@ impl Tool for BashTool {
 }
 
 // Read File Tool
-pub struct ReadFileTool;
+pub struct ReadFileTool {
+    sandbox_policy: Option<SandboxPolicy>,
+}
 
 impl ReadFileTool {
-    pub fn new() -> Self {
-        Self
+    pub fn new(sandbox_policy: Option<SandboxPolicy>) -> Self {
+        Self { sandbox_policy }
     }
 }
 
@@ -187,6 +259,17 @@ impl Tool for ReadFileTool {
 
         let path = shellexpand::tilde(path).to_string();
 
+        // Check credential directory access
+        if let Some(ref policy) = self.sandbox_policy
+            && sandbox::policy::is_path_denied(std::path::Path::new(&path), policy)
+        {
+            anyhow::bail!(
+                "Cannot read file in denied directory: {}. \
+                     This path is blocked by sandbox policy.",
+                path
+            );
+        }
+
         debug!("Reading file: {}", path);
 
         let content = fs::read_to_string(&path)?;
@@ -214,11 +297,17 @@ impl Tool for ReadFileTool {
 }
 
 // Write File Tool
-pub struct WriteFileTool;
+pub struct WriteFileTool {
+    state_dir: PathBuf,
+    sandbox_policy: Option<SandboxPolicy>,
+}
 
 impl WriteFileTool {
-    pub fn new() -> Self {
-        Self
+    pub fn new(state_dir: PathBuf, sandbox_policy: Option<SandboxPolicy>) -> Self {
+        Self {
+            state_dir,
+            sandbox_policy,
+        }
     }
 }
 
@@ -261,6 +350,36 @@ impl Tool for WriteFileTool {
         let path = shellexpand::tilde(path).to_string();
         let path = PathBuf::from(&path);
 
+        // Check credential directory access
+        if let Some(ref policy) = self.sandbox_policy
+            && sandbox::policy::is_path_denied(&path, policy)
+        {
+            anyhow::bail!(
+                "Cannot write to denied directory: {}. \
+                     This path is blocked by sandbox policy.",
+                path.display()
+            );
+        }
+
+        // Check protected files
+        if let Some(name) = path.file_name().and_then(|n| n.to_str())
+            && crate::security::is_workspace_file_protected(name)
+        {
+            let detail = format!("Agent attempted write to {}", path.display());
+            let _ = crate::security::append_audit_entry_with_detail(
+                &self.state_dir,
+                crate::security::AuditAction::WriteBlocked,
+                "",
+                "tool:write_file",
+                Some(&detail),
+            );
+            anyhow::bail!(
+                "Cannot write to protected file: {}. This file is managed by the security system. \
+                     Use `localgpt md sign` to update the security policy.",
+                path.display()
+            );
+        }
+
         debug!("Writing file: {}", path.display());
 
         // Create parent directories if needed
@@ -279,11 +398,17 @@ impl Tool for WriteFileTool {
 }
 
 // Edit File Tool
-pub struct EditFileTool;
+pub struct EditFileTool {
+    state_dir: PathBuf,
+    sandbox_policy: Option<SandboxPolicy>,
+}
 
 impl EditFileTool {
-    pub fn new() -> Self {
-        Self
+    pub fn new(state_dir: PathBuf, sandbox_policy: Option<SandboxPolicy>) -> Self {
+        Self {
+            state_dir,
+            sandbox_policy,
+        }
     }
 }
 
@@ -336,6 +461,37 @@ impl Tool for EditFileTool {
         let replace_all = args["replace_all"].as_bool().unwrap_or(false);
 
         let path = shellexpand::tilde(path).to_string();
+
+        // Check credential directory access
+        if let Some(ref policy) = self.sandbox_policy
+            && sandbox::policy::is_path_denied(std::path::Path::new(&path), policy)
+        {
+            anyhow::bail!(
+                "Cannot edit file in denied directory: {}. \
+                     This path is blocked by sandbox policy.",
+                path
+            );
+        }
+
+        // Check protected files
+        if let Some(name) = std::path::Path::new(&path)
+            .file_name()
+            .and_then(|n| n.to_str())
+            && crate::security::is_workspace_file_protected(name)
+        {
+            let detail = format!("Agent attempted edit to {}", path);
+            let _ = crate::security::append_audit_entry_with_detail(
+                &self.state_dir,
+                crate::security::AuditAction::WriteBlocked,
+                "",
+                "tool:edit_file",
+                Some(&detail),
+            );
+            anyhow::bail!(
+                "Cannot edit protected file: {}. This file is managed by the security system.",
+                path
+            );
+        }
 
         debug!("Editing file: {}", path);
 
@@ -408,14 +564,14 @@ impl Tool for MemorySearchTool {
         let mut results = Vec::new();
 
         let memory_file = self.workspace.join("MEMORY.md");
-        if memory_file.exists() {
-            if let Ok(content) = fs::read_to_string(&memory_file) {
-                for (i, line) in content.lines().enumerate() {
-                    if line.to_lowercase().contains(&query.to_lowercase()) {
-                        results.push(format!("MEMORY.md:{}: {}", i + 1, line));
-                        if results.len() >= limit {
-                            break;
-                        }
+        if memory_file.exists()
+            && let Ok(content) = fs::read_to_string(&memory_file)
+        {
+            for (i, line) in content.lines().enumerate() {
+                if line.to_lowercase().contains(&query.to_lowercase()) {
+                    results.push(format!("MEMORY.md:{}: {}", i + 1, line));
+                    if results.len() >= limit {
+                        break;
                     }
                 }
             }
@@ -423,29 +579,24 @@ impl Tool for MemorySearchTool {
 
         // Search daily logs
         let memory_dir = self.workspace.join("memory");
-        if memory_dir.exists() {
-            if let Ok(entries) = fs::read_dir(&memory_dir) {
-                for entry in entries.filter_map(|e| e.ok()) {
-                    if results.len() >= limit {
-                        break;
-                    }
+        if memory_dir.exists()
+            && let Ok(entries) = fs::read_dir(&memory_dir)
+        {
+            for entry in entries.filter_map(|e| e.ok()) {
+                if results.len() >= limit {
+                    break;
+                }
 
-                    let path = entry.path();
-                    if path.extension().map(|e| e == "md").unwrap_or(false) {
-                        if let Ok(content) = fs::read_to_string(&path) {
-                            let filename = path.file_name().unwrap().to_string_lossy();
-                            for (i, line) in content.lines().enumerate() {
-                                if line.to_lowercase().contains(&query.to_lowercase()) {
-                                    results.push(format!(
-                                        "memory/{}:{}: {}",
-                                        filename,
-                                        i + 1,
-                                        line
-                                    ));
-                                    if results.len() >= limit {
-                                        break;
-                                    }
-                                }
+                let path = entry.path();
+                if path.extension().map(|e| e == "md").unwrap_or(false)
+                    && let Ok(content) = fs::read_to_string(&path)
+                {
+                    let filename = path.file_name().unwrap().to_string_lossy();
+                    for (i, line) in content.lines().enumerate() {
+                        if line.to_lowercase().contains(&query.to_lowercase()) {
+                            results.push(format!("memory/{}:{}: {}", filename, i + 1, line));
+                            if results.len() >= limit {
+                                break;
                             }
                         }
                     }

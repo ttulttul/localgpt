@@ -6,7 +6,7 @@ mod workspace;
 
 #[cfg(feature = "gguf")]
 pub use embeddings::LlamaCppProvider;
-pub use embeddings::{hash_text, EmbeddingProvider, FastEmbedProvider, OpenAIEmbeddingProvider};
+pub use embeddings::{EmbeddingProvider, FastEmbedProvider, OpenAIEmbeddingProvider, hash_text};
 pub use index::{MemoryIndex, ReindexStats};
 pub use search::MemoryChunk;
 pub use watcher::MemoryWatcher;
@@ -75,19 +75,23 @@ impl MemoryManager {
         app_config: Option<&Config>,
         agent_id: &str,
     ) -> Result<Self> {
-        let workspace = shellexpand::tilde(&memory_config.workspace).to_string();
-        let workspace = PathBuf::from(workspace);
+        // Use paths from app_config if available, otherwise resolve fresh
+        let paths = if let Some(config) = app_config {
+            config.paths.clone()
+        } else {
+            crate::paths::Paths::resolve()?
+        };
+
+        let workspace = paths.workspace.clone();
 
         // Initialize workspace with templates if needed, returns true if brand new
-        let is_brand_new = init_workspace(&workspace)?;
+        let is_brand_new = init_workspace(&workspace, &paths)?;
 
-        // Database goes in state_dir/memory/{agentId}.sqlite (OpenClaw-compatible)
-        let state_dir = workspace
-            .parent()
-            .ok_or_else(|| anyhow::anyhow!("Workspace has no parent directory"))?;
-        let memory_dir = state_dir.join("memory");
-        std::fs::create_dir_all(&memory_dir)?;
-        let db_path = memory_dir.join(format!("{}.sqlite", agent_id));
+        // Database goes in cache_dir/memory/{agentId}.sqlite (XDG cache — regenerable)
+        let db_path = paths.search_index(agent_id);
+        if let Some(parent) = db_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
 
         let index = MemoryIndex::new_with_db_path(&workspace, &db_path)?
             .with_chunk_config(memory_config.chunk_size, memory_config.chunk_overlap);
@@ -116,7 +120,10 @@ impl MemoryManager {
                         Some(Arc::new(provider))
                     }
                     Err(e) => {
-                        warn!("Failed to initialize local embeddings: {}. Falling back to FTS-only search.", e);
+                        warn!(
+                            "Failed to initialize local embeddings: {}. Falling back to FTS-only search.",
+                            e
+                        );
                         None
                     }
                 }
@@ -135,16 +142,23 @@ impl MemoryManager {
                                 Some(Arc::new(provider))
                             }
                             Err(e) => {
-                                warn!("Failed to initialize OpenAI embeddings: {}. Falling back to FTS-only search.", e);
+                                warn!(
+                                    "Failed to initialize OpenAI embeddings: {}. Falling back to FTS-only search.",
+                                    e
+                                );
                                 None
                             }
                         }
                     } else {
-                        warn!("OpenAI embedding provider requested but no OpenAI config found. Falling back to FTS-only search.");
+                        warn!(
+                            "OpenAI embedding provider requested but no OpenAI config found. Falling back to FTS-only search."
+                        );
                         None
                     }
                 } else {
-                    warn!("OpenAI embedding provider requested but no app config provided. Falling back to FTS-only search.");
+                    warn!(
+                        "OpenAI embedding provider requested but no app config provided. Falling back to FTS-only search."
+                    );
                     None
                 }
             }
@@ -161,14 +175,19 @@ impl MemoryManager {
                         Some(Arc::new(provider))
                     }
                     Err(e) => {
-                        warn!("Failed to initialize GGUF embeddings: {}. Falling back to FTS-only search.", e);
+                        warn!(
+                            "Failed to initialize GGUF embeddings: {}. Falling back to FTS-only search.",
+                            e
+                        );
                         None
                     }
                 }
             }
             #[cfg(not(feature = "gguf"))]
             "gguf" => {
-                warn!("GGUF embedding provider requested but 'gguf' feature is not enabled. Build with --features gguf. Falling back to FTS-only search.");
+                warn!(
+                    "GGUF embedding provider requested but 'gguf' feature is not enabled. Build with --features gguf. Falling back to FTS-only search."
+                );
                 None
             }
             "none" => {
@@ -299,14 +318,14 @@ impl MemoryManager {
             let filename = format!("{}.md", date.format("%Y-%m-%d"));
             let path = memory_dir.join(&filename);
 
-            if path.exists() {
-                if let Ok(file_content) = fs::read_to_string(&path) {
-                    if !content.is_empty() {
-                        content.push_str("\n---\n\n");
-                    }
-                    content.push_str(&format!("## {}\n\n", filename));
-                    content.push_str(&file_content);
+            if path.exists()
+                && let Ok(file_content) = fs::read_to_string(&path)
+            {
+                if !content.is_empty() {
+                    content.push_str("\n---\n\n");
                 }
+                content.push_str(&format!("## {}\n\n", filename));
+                content.push_str(&file_content);
             }
         }
 

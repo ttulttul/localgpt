@@ -18,6 +18,9 @@
 # OpenAI API (requires OPENAI_API_KEY):
 #   - "openai/gpt-4o", "openai/gpt-4o-mini", "openai/gpt-4-turbo"
 #
+# GLM / Z.AI API (requires GLM API key):
+#   - "glm/glm-4.7" (or use alias "glm")
+#
 # Claude CLI (local, no API key needed):
 #   - "claude-cli/opus", "claude-cli/sonnet", "claude-cli/haiku"
 #
@@ -42,6 +45,9 @@ base_url = "https://api.anthropic.com"
 # [providers.openai]
 # api_key = "${OPENAI_API_KEY}"
 # base_url = "https://api.openai.com/v1"
+# For local OpenAI-compatible servers (LM Studio, llamafile, vLLM):
+# api_key = "not-needed"
+# base_url = "http://127.0.0.1:8080/v1" # LM Studio default is http://127.0.0.1:1234/v1
 
 # Ollama configuration (for local models)
 # [providers.ollama]
@@ -53,6 +59,12 @@ base_url = "https://api.anthropic.com"
 # [providers.claude_cli]
 # command = "claude"
 # model = "opus"  # opus, sonnet, or haiku
+
+# GLM / Z.AI configuration (optional)
+# Get your API key at: https://z.ai/manage-apikey/apikey-list
+# [providers.glm]
+# api_key = "${GLM_API_KEY}"
+# base_url = "https://api.z.ai/api/coding/paas/v4"
 
 [heartbeat]
 # Enable automatic heartbeat
@@ -120,6 +132,22 @@ port = 31327
 
 # Bind address (127.0.0.1 for localhost only)
 bind = "127.0.0.1"
+
+# Telegram bot (optional)
+# Create a bot via @BotFather on Telegram to get an API token
+# [telegram]
+# enabled = true
+# api_token = "${TELEGRAM_BOT_TOKEN}"
+
+[security]
+# Abort on tamper or suspicious content in LocalGPT.md (default: false)
+# strict_policy = false
+
+# Skip loading the LocalGPT.md workspace security policy (default: false)
+# disable_policy = false
+
+# Skip the hardcoded security suffix injected at end of context (default: false)
+# disable_suffix = false
 
 [logging]
 # Log level: trace, debug, info, warn, error

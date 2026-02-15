@@ -183,7 +183,8 @@ impl FastEmbedProvider {
             if let Err(e) = std::fs::create_dir_all(path) {
                 debug!("Failed to create cache directory {}: {}", expanded, e);
             }
-            std::env::set_var("FASTEMBED_CACHE_DIR", &expanded);
+            // SAFETY: called during single-threaded init before any threads are spawned
+            unsafe { std::env::set_var("FASTEMBED_CACHE_DIR", &expanded) };
             debug!("Set FASTEMBED_CACHE_DIR to {}", expanded);
         }
 
@@ -322,8 +323,8 @@ impl LlamaCppProvider {
     /// - mxbai-embed-large-v1-q8_0.gguf (~670MB, 1024 dims)
     pub fn new(model_path: &str, cache_dir: Option<&str>) -> Result<Self> {
         use llama_cpp_2::llama_backend::LlamaBackend;
-        use llama_cpp_2::model::params::LlamaModelParams;
         use llama_cpp_2::model::LlamaModel;
+        use llama_cpp_2::model::params::LlamaModelParams;
 
         // Initialize backend
         let backend = LlamaBackend::init()?;

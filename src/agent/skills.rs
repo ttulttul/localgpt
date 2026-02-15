@@ -187,11 +187,11 @@ pub fn load_skills(workspace: &Path) -> Result<Vec<Skill>> {
     let mut skills_map: HashMap<String, Skill> = HashMap::new();
 
     // Load from managed directory first (lower priority)
-    if let Some(managed_dir) = get_managed_skills_dir() {
-        if managed_dir.exists() {
-            for skill in load_skills_from_dir(&managed_dir, SkillSource::Managed)? {
-                skills_map.insert(skill.name.clone(), skill);
-            }
+    if let Some(managed_dir) = get_managed_skills_dir()
+        && managed_dir.exists()
+    {
+        for skill in load_skills_from_dir(&managed_dir, SkillSource::Managed)? {
+            skills_map.insert(skill.name.clone(), skill);
         }
     }
 
@@ -211,9 +211,11 @@ pub fn load_skills(workspace: &Path) -> Result<Vec<Skill>> {
     Ok(skills)
 }
 
-/// Get the managed skills directory (~/.localgpt/skills/)
+/// Get the managed skills directory (data_dir/skills)
 fn get_managed_skills_dir() -> Option<PathBuf> {
-    directories::BaseDirs::new().map(|dirs| dirs.home_dir().join(".localgpt").join("skills"))
+    crate::paths::Paths::resolve()
+        .ok()
+        .map(|paths| paths.managed_skills_dir())
 }
 
 /// Load skills from a single directory
@@ -489,16 +491,15 @@ pub fn build_skills_prompt(skills: &[Skill]) -> String {
         return String::new();
     }
 
-    let mut lines = Vec::new();
-    lines.push("## Skills".to_string());
-    lines.push(String::new());
-    lines.push(
+    let mut lines = vec![
+        "## Skills".to_string(),
+        String::new(),
         "Before replying: scan available skills below. If one clearly applies, \
          read its SKILL.md with read_file, then follow it."
             .to_string(),
-    );
-    lines.push(String::new());
-    lines.push("<available_skills>".to_string());
+        String::new(),
+        "<available_skills>".to_string(),
+    ];
 
     for skill in &prompt_skills {
         let emoji_prefix = skill

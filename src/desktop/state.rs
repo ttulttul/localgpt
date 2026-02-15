@@ -55,6 +55,7 @@ pub enum WorkerMessage {
         name: String,
         id: String,
         output: String,
+        warnings: Vec<String>,
     },
     /// Tool calls pending approval
     ToolsPendingApproval(Vec<ToolCall>),
@@ -183,6 +184,7 @@ impl UiState {
                 name,
                 output,
                 id: _,
+                warnings: _,
             } => {
                 // Update tool status
                 if let Some(tool) = self.active_tools.iter_mut().find(|t| t.name == name) {

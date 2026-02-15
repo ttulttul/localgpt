@@ -2,8 +2,14 @@ pub mod ask;
 pub mod chat;
 pub mod config;
 pub mod daemon;
+#[cfg(feature = "desktop")]
 pub mod desktop;
+#[cfg(feature = "gen")]
+pub mod gen3d;
+pub mod md;
 pub mod memory;
+pub mod paths;
+pub mod sandbox;
 
 use clap::{Parser, Subcommand};
 
@@ -43,7 +49,12 @@ pub enum Commands {
     Ask(ask::AskArgs),
 
     /// Launch the desktop GUI
+    #[cfg(feature = "desktop")]
     Desktop(desktop::DesktopArgs),
+
+    /// Launch 3D scene generation mode (Bevy renderer)
+    #[cfg(feature = "gen")]
+    Gen(gen3d::GenArgs),
 
     /// Manage the daemon
     Daemon(daemon::DaemonArgs),
@@ -53,4 +64,13 @@ pub enum Commands {
 
     /// Configuration management
     Config(config::ConfigArgs),
+
+    /// LocalGPT.md policy management
+    Md(md::MdArgs),
+
+    /// Show resolved XDG directory paths
+    Paths,
+
+    /// Shell sandbox management
+    Sandbox(sandbox::SandboxArgs),
 }

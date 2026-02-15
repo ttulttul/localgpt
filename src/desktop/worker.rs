@@ -11,8 +11,8 @@ use anyhow::Result;
 use futures::StreamExt;
 
 use crate::agent::{
-    extract_tool_detail, list_sessions_for_agent, Agent, AgentConfig, StreamEvent, ToolCall,
-    DEFAULT_AGENT_ID,
+    Agent, AgentConfig, DEFAULT_AGENT_ID, StreamEvent, ToolCall, extract_tool_detail,
+    list_sessions_for_agent,
 };
 use crate::config::Config;
 use crate::memory::MemoryManager;
@@ -146,11 +146,17 @@ async fn worker_loop(
                                             });
                                         }
                                     }
-                                    StreamEvent::ToolCallEnd { name, id, output } => {
+                                    StreamEvent::ToolCallEnd {
+                                        name,
+                                        id,
+                                        output,
+                                        warnings,
+                                    } => {
                                         let _ = tx.send(WorkerMessage::ToolCallEnd {
                                             name,
                                             id,
                                             output,
+                                            warnings,
                                         });
                                     }
                                     StreamEvent::Done => {
@@ -328,10 +334,8 @@ Available commands:
         }
 
         // Auto-save session after chat completes
-        if should_auto_save {
-            if let Err(e) = agent.auto_save_session() {
-                eprintln!("Warning: Failed to auto-save session: {}", e);
-            }
+        if should_auto_save && let Err(e) = agent.auto_save_session() {
+            eprintln!("Warning: Failed to auto-save session: {}", e);
         }
     }
 

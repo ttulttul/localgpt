@@ -8,11 +8,19 @@
 //! - Desktop GUI (egui-based)
 
 pub mod agent;
+pub mod cli;
+pub mod commands;
 pub mod concurrency;
 pub mod config;
+#[cfg(feature = "desktop")]
 pub mod desktop;
+#[cfg(feature = "gen")]
+pub mod gen3d;
 pub mod heartbeat;
 pub mod memory;
+pub mod paths;
+pub mod sandbox;
+pub mod security;
 pub mod server;
 
 pub use config::Config;

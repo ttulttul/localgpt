@@ -6,11 +6,11 @@ use std::path::PathBuf;
 #[cfg(unix)]
 use daemonize::Daemonize;
 
-use localgpt::concurrency::TurnGate;
-use localgpt::config::Config;
-use localgpt::heartbeat::HeartbeatRunner;
-use localgpt::memory::MemoryManager;
-use localgpt::server::Server;
+use crate::concurrency::TurnGate;
+use crate::config::Config;
+use crate::heartbeat::HeartbeatRunner;
+use crate::memory::MemoryManager;
+use crate::server::Server;
 
 /// Synchronously stop the daemon (for use before Tokio runtime starts)
 pub fn stop_sync() -> Result<()> {
@@ -179,6 +179,20 @@ async fn run_daemon_services(config: &Config, agent_id: &str) -> Result<()> {
         None
     };
 
+    // Spawn Telegram bot in background if configured
+    let telegram_handle = if config.telegram.as_ref().is_some_and(|t| t.enabled) {
+        let tg_config = config.clone();
+        let tg_gate = turn_gate.clone();
+        println!("  Telegram: enabled");
+        Some(tokio::spawn(async move {
+            if let Err(e) = crate::server::telegram::run_telegram_bot(&tg_config, tg_gate).await {
+                tracing::error!("Telegram bot error: {}", e);
+            }
+        }))
+    } else {
+        None
+    };
+
     // Run server or wait for shutdown
     if config.server.enabled {
         println!(
@@ -196,8 +210,11 @@ async fn run_daemon_services(config: &Config, agent_id: &str) -> Result<()> {
         tokio::signal::ctrl_c().await?;
     }
 
-    // Abort heartbeat task on shutdown
+    // Abort background tasks on shutdown
     if let Some(handle) = heartbeat_handle {
+        handle.abort();
+    }
+    if let Some(handle) = telegram_handle {
         handle.abort();
     }
 
@@ -434,14 +451,13 @@ async fn run_heartbeat_once(agent_id: &str) -> Result<()> {
 }
 
 fn get_pid_file() -> Result<PathBuf> {
-    // Put PID file in state dir (~/.localgpt/), not workspace
-    let state_dir = localgpt::agent::get_state_dir()?;
-    Ok(state_dir.join("daemon.pid"))
+    let paths = crate::paths::Paths::resolve()?;
+    Ok(paths.pid_file())
 }
 
 fn get_log_file(retention_days: u32) -> Result<PathBuf> {
-    let state_dir = localgpt::agent::get_state_dir()?;
-    let logs_dir = state_dir.join("logs");
+    let paths = crate::paths::Paths::resolve()?;
+    let logs_dir = paths.logs_dir();
     fs::create_dir_all(&logs_dir)?;
 
     // Prune old logs only if retention_days > 0
@@ -465,15 +481,14 @@ fn prune_old_logs(logs_dir: &std::path::Path, keep_days: i64) {
             let name_str = name.to_string_lossy();
 
             // Match localgpt-YYYY-MM-DD.log pattern
-            if name_str.starts_with("localgpt-") && name_str.ends_with(".log") {
-                if let Some(date_part) = name_str
+            if name_str.starts_with("localgpt-")
+                && name_str.ends_with(".log")
+                && let Some(date_part) = name_str
                     .strip_prefix("localgpt-")
                     .and_then(|s| s.strip_suffix(".log"))
-                {
-                    if date_part < cutoff_date.as_str() {
-                        let _ = fs::remove_file(entry.path());
-                    }
-                }
+                && date_part < cutoff_date.as_str()
+            {
+                let _ = fs::remove_file(entry.path());
             }
         }
     }

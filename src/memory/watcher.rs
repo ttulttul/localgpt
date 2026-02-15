@@ -32,10 +32,10 @@ impl MemoryWatcher {
                     match event.kind {
                         EventKind::Modify(_) | EventKind::Create(_) => {
                             for path in event.paths {
-                                if path.extension().map(|e| e == "md").unwrap_or(false) {
-                                    if let Err(e) = tx.send(path.clone()) {
-                                        warn!("Failed to send event: {}", e);
-                                    }
+                                if path.extension().map(|e| e == "md").unwrap_or(false)
+                                    && let Err(e) = tx.send(path.clone())
+                                {
+                                    warn!("Failed to send event: {}", e);
                                 }
                             }
                         }

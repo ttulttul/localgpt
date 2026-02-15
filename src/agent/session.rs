@@ -452,10 +452,10 @@ impl Session {
             match entry["type"].as_str() {
                 // Pi format header
                 Some("session") => {
-                    if let Some(ts) = entry["timestamp"].as_str() {
-                        if let Ok(dt) = DateTime::parse_from_rfc3339(ts) {
-                            session.created_at = dt.with_timezone(&Utc);
-                        }
+                    if let Some(ts) = entry["timestamp"].as_str()
+                        && let Ok(dt) = DateTime::parse_from_rfc3339(ts)
+                    {
+                        session.created_at = dt.with_timezone(&Utc);
                     }
                     if let Some(cwd) = entry["cwd"].as_str() {
                         session.cwd = cwd.to_string();
@@ -469,14 +469,14 @@ impl Session {
                 }
                 // Pi format message
                 Some("message") => {
-                    if let Some(msg_obj) = entry.get("message") {
-                        if let Some(sm) = Self::parse_pi_message(msg_obj) {
-                            // System messages become system_context
-                            if sm.message.role == Role::System && session.system_context.is_none() {
-                                session.system_context = Some(sm.message.content);
-                            } else {
-                                session.messages.push(sm);
-                            }
+                    if let Some(msg_obj) = entry.get("message")
+                        && let Some(sm) = Self::parse_pi_message(msg_obj)
+                    {
+                        // System messages become system_context
+                        if sm.message.role == Role::System && session.system_context.is_none() {
+                            session.system_context = Some(sm.message.content);
+                        } else {
+                            session.messages.push(sm);
                         }
                     }
                 }
@@ -596,22 +596,13 @@ fn get_sessions_dir() -> Result<PathBuf> {
 }
 
 pub fn get_sessions_dir_for_agent(agent_id: &str) -> Result<PathBuf> {
-    let base = directories::BaseDirs::new()
-        .ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?;
-
-    Ok(base
-        .home_dir()
-        .join(".localgpt")
-        .join("agents")
-        .join(agent_id)
-        .join("sessions"))
+    let paths = crate::paths::Paths::resolve()?;
+    Ok(paths.sessions_dir(agent_id))
 }
 
 pub fn get_state_dir() -> Result<PathBuf> {
-    let base = directories::BaseDirs::new()
-        .ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?;
-
-    Ok(base.home_dir().join(".localgpt"))
+    let paths = crate::paths::Paths::resolve()?;
+    Ok(paths.state_dir)
 }
 
 fn estimate_tokens(text: &str) -> usize {
@@ -658,27 +649,27 @@ pub fn list_sessions_for_agent(agent_id: &str) -> Result<Vec<SessionInfo>> {
 
         if let Ok(file) = File::open(&path) {
             let reader = BufReader::new(file);
-            if let Some(Ok(first_line)) = reader.lines().next() {
-                if let Ok(header) = serde_json::from_str::<serde_json::Value>(&first_line) {
-                    // Pi format header
-                    if header["type"].as_str() == Some("session") {
-                        let created_at = header["timestamp"]
-                            .as_str()
-                            .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
-                            .map(|dt| dt.with_timezone(&Utc))
-                            .unwrap_or_else(Utc::now);
+            if let Some(Ok(first_line)) = reader.lines().next()
+                && let Ok(header) = serde_json::from_str::<serde_json::Value>(&first_line)
+            {
+                // Pi format header
+                if header["type"].as_str() == Some("session") {
+                    let created_at = header["timestamp"]
+                        .as_str()
+                        .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+                        .map(|dt| dt.with_timezone(&Utc))
+                        .unwrap_or_else(Utc::now);
 
-                        let message_count = fs::read_to_string(&path)
-                            .map(|s| s.lines().count().saturating_sub(1))
-                            .unwrap_or(0);
+                    let message_count = fs::read_to_string(&path)
+                        .map(|s| s.lines().count().saturating_sub(1))
+                        .unwrap_or(0);
 
-                        sessions.push(SessionInfo {
-                            id: filename.to_string(),
-                            created_at,
-                            message_count,
-                            file_size,
-                        });
-                    }
+                    sessions.push(SessionInfo {
+                        id: filename.to_string(),
+                        created_at,
+                        message_count,
+                        file_size,
+                    });
                 }
             }
         }
@@ -723,28 +714,27 @@ pub fn search_sessions_for_agent(agent_id: &str, query: &str) -> Result<Vec<Sess
         let entry = entry?;
         let path = entry.path();
 
-        if path.extension().map(|e| e == "jsonl").unwrap_or(false) {
-            if let Some(filename) = path.file_stem().and_then(|s| s.to_str()) {
-                if let Ok(content) = fs::read_to_string(&path) {
-                    let content_lower = content.to_lowercase();
-                    let match_count = content_lower.matches(&query_lower).count();
+        if path.extension().map(|e| e == "jsonl").unwrap_or(false)
+            && let Some(filename) = path.file_stem().and_then(|s| s.to_str())
+            && let Ok(content) = fs::read_to_string(&path)
+        {
+            let content_lower = content.to_lowercase();
+            let match_count = content_lower.matches(&query_lower).count();
 
-                    if match_count > 0 {
-                        let preview = extract_match_preview(&content, &query_lower, 100);
+            if match_count > 0 {
+                let preview = extract_match_preview(&content, &query_lower, 100);
 
-                        let created_at = fs::metadata(&path)
-                            .and_then(|m| m.created())
-                            .map(DateTime::<Utc>::from)
-                            .unwrap_or_else(|_| Utc::now());
+                let created_at = fs::metadata(&path)
+                    .and_then(|m| m.created())
+                    .map(DateTime::<Utc>::from)
+                    .unwrap_or_else(|_| Utc::now());
 
-                        results.push(SessionSearchResult {
-                            session_id: filename.to_string(),
-                            created_at,
-                            message_preview: preview,
-                            match_count,
-                        });
-                    }
-                }
+                results.push(SessionSearchResult {
+                    session_id: filename.to_string(),
+                    created_at,
+                    message_preview: preview,
+                    match_count,
+                });
             }
         }
     }
